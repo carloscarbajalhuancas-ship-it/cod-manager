@@ -18,7 +18,7 @@ export default function CodDashboard() {
 
   // Filtros de tabla
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('todos'); // 'todos' | 'con_adelanto' | 'pendiente' | 'confirmado' ...
+  const [statusFilter, setStatusFilter] = useState('todos');
   const [zoneFilter, setZoneFilter] = useState('todos');
 
   // Modal de edición
@@ -39,7 +39,7 @@ export default function CodDashboard() {
       setAdSpend(localStorage.getItem('cod_spend') || '');
       setFleteLima(localStorage.getItem('cod_flete_lima') || '12');
       setFleteProv(localStorage.getItem('cod_flete_prov') || '15');
-      
+
       const todayStr = new Date().toISOString().split('T')[0];
       setCustomStart(todayStr);
       setCustomEnd(todayStr);
@@ -68,7 +68,7 @@ export default function CodDashboard() {
     fetchData();
 
     const channel = supabase
-      .channel('realtime_dashboard_bulk')
+      .channel('realtime_dashboard_final')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
       .subscribe();
@@ -142,6 +142,7 @@ export default function CodDashboard() {
     }
   };
 
+  // Actualizar estado de pedido
   const updateOrderStatus = async (order, newStatus) => {
     const isOldConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
     const isNewConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(newStatus);
@@ -158,6 +159,32 @@ export default function CodDashboard() {
     }
 
     await supabase.from('orders').update(payload).eq('id', order.id);
+    fetchData();
+  };
+
+  // 🔥 REGISTRAR ADELANTO Y AUTO-CONFIRMAR
+  const handleAdvanceChange = async (order, newAdvanceVal) => {
+    const advance = parseFloat(newAdvanceVal) || 0;
+    const wasConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
+
+    let newStatus = order.status;
+    let shouldDeductStock = false;
+
+    // Si colocó adelanto y estaba pendiente, se pasa a Confirmado en automático
+    if (advance > 0 && order.status === 'pendiente') {
+      newStatus = 'confirmado';
+      shouldDeductStock = true;
+    }
+
+    if (shouldDeductStock && !wasConfirmed) {
+      await adjustStock(order.items, -1);
+    }
+
+    await supabase.from('orders').update({
+      advance_payment: advance,
+      status: newStatus,
+    }).eq('id', order.id);
+
     fetchData();
   };
 
@@ -224,9 +251,17 @@ export default function CodDashboard() {
   const saveEditedOrder = async (e) => {
     e.preventDefault();
     const original = orders.find((o) => o.id === editingOrder.id);
-    if (original && original.status !== editingOrder.status) {
+    const advance = parseFloat(editingOrder.advance_payment) || 0;
+    let targetStatus = editingOrder.status;
+
+    // Si en el modal puso adelanto y seguía pendiente, pasa a confirmado
+    if (advance > 0 && targetStatus === 'pendiente') {
+      targetStatus = 'confirmado';
+    }
+
+    if (original && original.status !== targetStatus) {
       const isOldConf = ['confirmado', 'en_ruta', 'entregado'].includes(original.status);
-      const isNewConf = ['confirmado', 'en_ruta', 'entregado'].includes(editingOrder.status);
+      const isNewConf = ['confirmado', 'en_ruta', 'entregado'].includes(targetStatus);
       if (!isOldConf && isNewConf) await adjustStock(original.items, -1);
       if (isOldConf && !isNewConf) await adjustStock(original.items, 1);
     }
@@ -239,10 +274,10 @@ export default function CodDashboard() {
       customer_dni: editingOrder.customer_dni,
       zone: editingOrder.zone,
       total_amount: parseFloat(editingOrder.total_amount) || 0,
-      advance_payment: editingOrder.status === 'entregado'
+      advance_payment: targetStatus === 'entregado'
         ? (parseFloat(editingOrder.total_amount) || 0)
-        : (parseFloat(editingOrder.advance_payment) || 0),
-      status: editingOrder.status,
+        : advance,
+      status: targetStatus,
     };
 
     await supabase.from('orders').update(payload).eq('id', editingOrder.id);
@@ -286,7 +321,6 @@ export default function CodDashboard() {
     const canceledOrders = dateFilteredOrders.filter((o) => o.status === 'cancelado');
     const pendingOrders = dateFilteredOrders.filter((o) => o.status === 'pendiente');
 
-    // Pedidos con adelanto en este periodo (excluyendo cancelados)
     const ordersWithAdvance = dateFilteredOrders.filter(
       (o) => (parseFloat(o.advance_payment) || 0) > 0 && o.status !== 'cancelado'
     );
@@ -603,7 +637,6 @@ export default function CodDashboard() {
             {/* ================= BARRA FLOTANTE DE RESUMEN SELECCIONADO ================= */}
             {selectedOrders.length > 0 && (
               <div className="bg-gradient-to-r from-emerald-950/95 via-[#141922] to-[#141922] border-2 border-emerald-500 p-4 rounded-2xl flex flex-col md:flex-row items-center justify-between gap-4 shadow-2xl">
-                {/* Desglose en vivo de todo lo seleccionado */}
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="flex items-center gap-2 bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 rounded-xl">
                     <span className="bg-emerald-500 text-zinc-950 font-black px-2 py-0.5 rounded-full text-xs">
@@ -629,7 +662,6 @@ export default function CodDashboard() {
                   </div>
                 </div>
 
-                {/* Botones de acción masiva */}
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-[10px] text-zinc-400 font-bold uppercase">Pasar a:</span>
                   <button
@@ -678,7 +710,6 @@ export default function CodDashboard() {
             {/* ================= BARRA DE PESTAÑAS Y ACCIÓN RÁPIDA ================= */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-[#11141a] p-3 rounded-xl border border-zinc-800">
               
-              {/* Pestañas de estado (incluye CON ADELANTO como primera clase) */}
               <div className="flex flex-wrap items-center gap-1.5">
                 {[
                   { id: 'todos', label: 'Todos', count: dateFilteredOrders.length, color: 'hover:bg-zinc-800' },
@@ -703,9 +734,7 @@ export default function CodDashboard() {
                 ))}
               </div>
 
-              {/* Botón de selección rápida + Zona */}
               <div className="flex flex-wrap items-center gap-2">
-                {/* Zona */}
                 <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-lg border border-zinc-800 text-xs">
                   {['todos', 'lima', 'provincia'].map((z) => (
                     <button
@@ -720,7 +749,6 @@ export default function CodDashboard() {
                   ))}
                 </div>
 
-                {/* BOTÓN RÁPIDO PARA MARCAR TODAS LAS CASILLAS CON ADELANTO */}
                 <button
                   onClick={handleSelectWithAdvance}
                   className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 shadow-sm"
@@ -787,7 +815,7 @@ export default function CodDashboard() {
 
                       let waMessage = '';
                       if (order.status === 'cancelado') {
-                        waMessage = `Hola ${order.customer_name}, te saludamos respecto a tu pedido ${order.order_number}. Vimos que no se pudo concretar. ¿Deseas reprogramarlo con una facilidad de entrega? Quedamos atentos para ayudarte.`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos de la tienda respecto a tu pedido ${order.order_number}. Vimos que no se pudo concretar. ¿Deseas reprogramarlo con una facilidad de despacho? Quedamos atentos para ayudarte.`;
                       } else if (order.zone === 'lima') {
                         waMessage = `Hola ${order.customer_name}, te saludamos para coordinar la entrega de tu pedido ${order.order_number} por S/ ${balance.toFixed(2)}. El despacho es a tu domicilio (${order.address}, ${order.city}) con motorizado contraentrega. ¿Me confirmas si estás disponible hoy?`;
                       } else {
@@ -850,9 +878,25 @@ export default function CodDashboard() {
                           <td className="py-3 px-3 text-right font-mono text-zinc-300">
                             S/ {total.toFixed(2)}
                           </td>
-                          <td className="py-3 px-3 text-right font-mono text-amber-400 font-bold">
-                            S/ {advance.toFixed(2)}
+
+                          {/* CASILLA DE ADELANTO INLINE EDITABLE (AUTO-CONFIRMA) */}
+                          <td className="py-3 px-3 text-right font-mono">
+                            <div className="flex items-center justify-end gap-1">
+                              <span className="text-amber-500 text-[10px] font-bold">S/</span>
+                              <input
+                                type="number"
+                                key={order.advance_payment}
+                                defaultValue={order.advance_payment || 0}
+                                onBlur={(e) => handleAdvanceChange(order, e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') e.target.blur();
+                                }}
+                                title="Al colocar un monto > 0, el pedido se pasa a Confirmado en automático"
+                                className="w-16 bg-zinc-900 border border-zinc-700 hover:border-amber-500/50 focus:border-amber-400 text-amber-300 font-bold rounded px-1.5 py-0.5 text-right text-xs focus:outline-none transition"
+                              />
+                            </div>
                           </td>
+
                           <td className="py-3 px-3 text-right font-mono font-bold whitespace-nowrap">
                             {isDelivered ? (
                               <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-extrabold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
@@ -864,6 +908,7 @@ export default function CodDashboard() {
                               </span>
                             )}
                           </td>
+
                           <td className="py-3 px-3">
                             <select
                               value={order.status || 'pendiente'}
@@ -1348,7 +1393,15 @@ export default function CodDashboard() {
                   <input
                     type="number"
                     value={editingOrder.advance_payment}
-                    onChange={(e) => setEditingOrder({ ...editingOrder, advance_payment: e.target.value })}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const num = parseFloat(val) || 0;
+                      setEditingOrder({
+                        ...editingOrder,
+                        advance_payment: val,
+                        status: num > 0 && editingOrder.status === 'pendiente' ? 'confirmado' : editingOrder.status,
+                      });
+                    }}
                     className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-white font-mono"
                   />
                 </div>
