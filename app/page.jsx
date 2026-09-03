@@ -18,9 +18,8 @@ export default function CodDashboard() {
 
   // Filtros de tabla
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('todos');
+  const [statusFilter, setStatusFilter] = useState('todos'); // 'todos' | 'con_adelanto' | 'pendiente' | 'confirmado' ...
   const [zoneFilter, setZoneFilter] = useState('todos');
-  const [advanceFilter, setAdvanceFilter] = useState('todos'); // 'todos' | 'con_adelanto' | 'sin_adelanto'
 
   // Modal de edición
   const [editingOrder, setEditingOrder] = useState(null);
@@ -278,7 +277,7 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // ================= CÁLCULO DE MÉTRICAS & FLUJO OPERATIVO =================
+  // ================= CÁLCULO DE MÉTRICAS & FLUJO =================
   const metrics = useMemo(() => {
     const totalShopifyOrders = dateFilteredOrders.length;
     const confirmedOrders = dateFilteredOrders.filter((o) => ['confirmado', 'en_ruta', 'entregado'].includes(o.status));
@@ -287,7 +286,11 @@ export default function CodDashboard() {
     const canceledOrders = dateFilteredOrders.filter((o) => o.status === 'cancelado');
     const pendingOrders = dateFilteredOrders.filter((o) => o.status === 'pendiente');
 
-    // Control operativo de mesa y provincia
+    // Pedidos con adelanto en este periodo (excluyendo cancelados)
+    const ordersWithAdvance = dateFilteredOrders.filter(
+      (o) => (parseFloat(o.advance_payment) || 0) > 0 && o.status !== 'cancelado'
+    );
+
     const enMesaListos = dateFilteredOrders.filter((o) => o.status === 'confirmado');
     const provOrders = dateFilteredOrders.filter((o) => o.zone !== 'lima' && o.status !== 'cancelado');
     const provConAdelanto = provOrders.filter((o) => (parseFloat(o.advance_payment) || 0) > 0);
@@ -372,6 +375,7 @@ export default function CodDashboard() {
       canceledCount: canceledOrders.length,
       pendingCount: pendingOrders.length,
       inTransitCount: inTransitOrders.length,
+      ordersWithAdvanceCount: ordersWithAdvance.length,
       enMesaListosCount: enMesaListos.length,
       provConAdelantoCount: provConAdelanto.length,
       provSinAdelantoCount: provSinAdelanto.length,
@@ -396,7 +400,7 @@ export default function CodDashboard() {
     };
   }, [dateFilteredOrders, products, adSpend, fleteLima, fleteProv]);
 
-  // Filtro final para la tabla
+  // ================= FILTRADO DE LA TABLA =================
   const visibleOrders = dateFilteredOrders.filter((o) => {
     const term = search.toLowerCase();
     const matchSearch =
@@ -405,26 +409,49 @@ export default function CodDashboard() {
       (o.phone || '').includes(term) ||
       (o.city || '').toLowerCase().includes(term);
 
-    const matchStatus = statusFilter === 'todos' || o.status === statusFilter;
+    const matchStatus =
+      statusFilter === 'todos'
+        ? true
+        : statusFilter === 'con_adelanto'
+        ? (parseFloat(o.advance_payment) || 0) > 0
+        : o.status === statusFilter;
+
     const matchZone = zoneFilter === 'todos' || o.zone === zoneFilter;
 
-    const hasAdvance = (parseFloat(o.advance_payment) || 0) > 0;
-    const matchAdvance =
-      advanceFilter === 'todos'
-        ? true
-        : advanceFilter === 'con_adelanto'
-        ? hasAdvance
-        : !hasAdvance;
-
-    return matchSearch && matchStatus && matchZone && matchAdvance;
+    return matchSearch && matchStatus && matchZone;
   });
 
-  // Selección rápida de todos los que tienen adelanto
-  const selectAllWithAdvance = () => {
+  // ================= ESTADÍSTICAS EN VIVO DE LO SELECCIONADO =================
+  const selectedStats = useMemo(() => {
+    const targets = orders.filter((o) => selectedOrders.includes(o.id));
+    const count = targets.length;
+    const totalAmount = targets.reduce((acc, o) => acc + (parseFloat(o.total_amount) || 0), 0);
+    const totalAdvance = targets.reduce((acc, o) => acc + (parseFloat(o.advance_payment) || 0), 0);
+    const totalBalance = targets.reduce((acc, o) => {
+      if (o.status === 'entregado') return acc;
+      const t = parseFloat(o.total_amount) || 0;
+      const a = parseFloat(o.advance_payment) || 0;
+      return acc + Math.max(0, t - a);
+    }, 0);
+
+    return { count, totalAmount, totalAdvance, totalBalance };
+  }, [orders, selectedOrders]);
+
+  // Botón: Seleccionar todos con adelanto
+  const handleSelectWithAdvance = () => {
     const idsWithAdvance = visibleOrders
       .filter((o) => (parseFloat(o.advance_payment) || 0) > 0)
       .map((o) => o.id);
-    setSelectedOrders(idsWithAdvance);
+
+    const allAreSelected =
+      idsWithAdvance.length > 0 &&
+      idsWithAdvance.every((id) => selectedOrders.includes(id));
+
+    if (allAreSelected) {
+      setSelectedOrders((prev) => prev.filter((id) => !idsWithAdvance.includes(id)));
+    } else {
+      setSelectedOrders((prev) => Array.from(new Set([...prev, ...idsWithAdvance])));
+    }
   };
 
   const toggleSelectAll = () => {
@@ -533,25 +560,23 @@ export default function CodDashboard() {
         </section>
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 1: BANDEJA DE VENTAS CON CONTROL DE ADELANTOS & MESA              */}
+        {/* SECCIÓN 1: BANDEJA DE VENTAS                                              */}
         {/* ========================================================================= */}
         {activeTab === 'ventas' && (
           <section className="space-y-4">
             
-            {/* TARJETAS DE CONTROL OPERATIVO INMEDIATO */}
+            {/* TARJETAS DE CONTROL OPERATIVO */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              {/* 1. En Mesa / Alistando */}
               <div className="bg-[#11141a] border border-blue-500/40 p-3.5 rounded-xl flex items-center justify-between">
                 <div>
                   <span className="text-[10px] font-bold uppercase text-blue-400 block">📦 En Mesa (Por Empacar)</span>
-                  <p className="text-xs text-zinc-400 mt-0.5">Listos para armar y rotular</p>
+                  <p className="text-xs text-zinc-400 mt-0.5">Confirmados listos para empaque</p>
                 </div>
                 <span className="text-2xl font-black text-blue-300 font-mono">
                   {metrics.enMesaListosCount}
                 </span>
               </div>
 
-              {/* 2. Provincia con Adelanto (Shalom seguro) */}
               <div className="bg-[#11141a] border border-emerald-500/40 p-3.5 rounded-xl flex items-center justify-between">
                 <div>
                   <span className="text-[10px] font-bold uppercase text-emerald-400 block">🚚 Provincia c/ Adelanto</span>
@@ -564,7 +589,6 @@ export default function CodDashboard() {
                 </span>
               </div>
 
-              {/* 3. Provincia Sin Adelanto */}
               <div className="bg-[#11141a] border border-amber-500/40 p-3.5 rounded-xl flex items-center justify-between">
                 <div>
                   <span className="text-[10px] font-bold uppercase text-amber-400 block">⏳ Provincia s/ Adelanto</span>
@@ -576,20 +600,38 @@ export default function CodDashboard() {
               </div>
             </div>
 
-            {/* BARRA DE ACCIÓN MASIVA */}
+            {/* ================= BARRA FLOTANTE DE RESUMEN SELECCIONADO ================= */}
             {selectedOrders.length > 0 && (
-              <div className="bg-gradient-to-r from-emerald-950/90 via-[#161b24] to-[#161b24] border-2 border-emerald-500/80 p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-2xl">
-                <div className="flex items-center gap-2">
-                  <span className="bg-emerald-500 text-zinc-950 font-black px-2.5 py-0.5 rounded-full text-xs">
-                    {selectedOrders.length}
-                  </span>
-                  <span className="text-xs font-bold text-white uppercase tracking-wider">
-                    pedidos seleccionados
-                  </span>
+              <div className="bg-gradient-to-r from-emerald-950/95 via-[#141922] to-[#141922] border-2 border-emerald-500 p-4 rounded-2xl flex flex-col md:flex-row items-center justify-between gap-4 shadow-2xl">
+                {/* Desglose en vivo de todo lo seleccionado */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2 bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 rounded-xl">
+                    <span className="bg-emerald-500 text-zinc-950 font-black px-2 py-0.5 rounded-full text-xs">
+                      {selectedStats.count}
+                    </span>
+                    <span className="text-xs font-black text-white uppercase tracking-wider">
+                      Seleccionados
+                    </span>
+                  </div>
+
+                  <div className="h-5 w-px bg-zinc-700 hidden sm:block"></div>
+
+                  <div className="text-xs font-mono text-zinc-300">
+                    Total: <strong className="text-white text-sm">S/ {selectedStats.totalAmount.toFixed(2)}</strong>
+                  </div>
+
+                  <div className="text-xs font-mono text-amber-400 bg-amber-950/40 px-2.5 py-1 rounded-lg border border-amber-500/30">
+                    Adelantos: <strong>S/ {selectedStats.totalAdvance.toFixed(2)}</strong>
+                  </div>
+
+                  <div className="text-xs font-mono text-emerald-400 bg-emerald-950/40 px-2.5 py-1 rounded-lg border border-emerald-500/30">
+                    Por Cobrar: <strong>S/ {selectedStats.totalBalance.toFixed(2)}</strong>
+                  </div>
                 </div>
 
+                {/* Botones de acción masiva */}
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[11px] text-zinc-400 font-bold uppercase">Cambiar a:</span>
+                  <span className="text-[10px] text-zinc-400 font-bold uppercase">Pasar a:</span>
                   <button
                     onClick={() => handleBulkStatusChange('confirmado')}
                     className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition"
@@ -604,9 +646,10 @@ export default function CodDashboard() {
                   </button>
                   <button
                     onClick={() => handleBulkStatusChange('entregado')}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition border border-emerald-400 shadow-md"
+                    title="Liquida el saldo restante a S/ 0.00 en automático"
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition border border-emerald-400 shadow"
                   >
-                    Entregados (Liquidar 100%)
+                    Entregados (Liquidar)
                   </button>
                   <button
                     onClick={() => handleBulkStatusChange('cancelado')}
@@ -617,27 +660,29 @@ export default function CodDashboard() {
 
                   <button
                     onClick={handleBulkDelete}
-                    className="bg-zinc-800 hover:bg-rose-950 text-rose-400 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-rose-900/40 ml-2"
+                    className="bg-zinc-800 hover:bg-rose-950 text-rose-400 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-rose-900/40 ml-1"
                   >
                     🗑️ Borrar
                   </button>
 
                   <button
                     onClick={() => setSelectedOrders([])}
-                    className="text-xs text-zinc-400 hover:text-white underline ml-2"
+                    className="text-xs text-zinc-400 hover:text-white underline ml-1"
                   >
-                    Cancelar
+                    Desmarcar
                   </button>
                 </div>
               </div>
             )}
 
-            {/* FILTROS MULTIDIMENSIONALES (ESTADO, ZONA Y ADELANTO) */}
+            {/* ================= BARRA DE PESTAÑAS Y ACCIÓN RÁPIDA ================= */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-[#11141a] p-3 rounded-xl border border-zinc-800">
-              {/* Filtro Estado */}
-              <div className="flex flex-wrap gap-1.5">
+              
+              {/* Pestañas de estado (incluye CON ADELANTO como primera clase) */}
+              <div className="flex flex-wrap items-center gap-1.5">
                 {[
                   { id: 'todos', label: 'Todos', count: dateFilteredOrders.length, color: 'hover:bg-zinc-800' },
+                  { id: 'con_adelanto', label: '💰 Con Adelanto', count: metrics.ordersWithAdvanceCount, color: 'text-emerald-400 border border-emerald-500/40 bg-emerald-950/20 hover:bg-emerald-900/40' },
                   { id: 'pendiente', label: 'Pendientes', count: metrics.pendingCount, color: 'text-amber-400' },
                   { id: 'confirmado', label: 'Confirmados', count: metrics.confirmedCount, color: 'text-blue-400' },
                   { id: 'en_ruta', label: 'En Ruta', count: dateFilteredOrders.filter((o) => o.status === 'en_ruta').length, color: 'text-purple-400' },
@@ -649,7 +694,7 @@ export default function CodDashboard() {
                     onClick={() => setStatusFilter(tab.id)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-bold tracking-wider transition ${
                       statusFilter === tab.id
-                        ? 'bg-zinc-100 text-zinc-950'
+                        ? 'bg-zinc-100 text-zinc-950 shadow-md'
                         : `bg-zinc-900 border border-zinc-800 text-zinc-300 ${tab.color}`
                     }`}
                   >
@@ -658,7 +703,7 @@ export default function CodDashboard() {
                 ))}
               </div>
 
-              {/* Filtro Zona y Adelanto */}
+              {/* Botón de selección rápida + Zona */}
               <div className="flex flex-wrap items-center gap-2">
                 {/* Zona */}
                 <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-lg border border-zinc-800 text-xs">
@@ -675,45 +720,12 @@ export default function CodDashboard() {
                   ))}
                 </div>
 
-                {/* Filtro Adelanto */}
-                <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-lg border border-zinc-800 text-xs">
-                  <button
-                    onClick={() => setAdvanceFilter('todos')}
-                    className={`px-2.5 py-1 rounded text-[11px] font-bold ${
-                      advanceFilter === 'todos' ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    Todos
-                  </button>
-                  <button
-                    onClick={() => setAdvanceFilter('con_adelanto')}
-                    className={`px-2.5 py-1 rounded text-[11px] font-bold ${
-                      advanceFilter === 'con_adelanto'
-                        ? 'bg-emerald-600 text-white'
-                        : 'text-emerald-400 hover:text-emerald-300'
-                    }`}
-                  >
-                    💰 Con Adelanto
-                  </button>
-                  <button
-                    onClick={() => setAdvanceFilter('sin_adelanto')}
-                    className={`px-2.5 py-1 rounded text-[11px] font-bold ${
-                      advanceFilter === 'sin_adelanto'
-                        ? 'bg-amber-600 text-white'
-                        : 'text-zinc-400 hover:text-zinc-300'
-                    }`}
-                  >
-                    Sin Adelanto
-                  </button>
-                </div>
-
-                {/* BOTÓN RÁPIDO: SELECCIONAR TODOS CON ADELANTO */}
+                {/* BOTÓN RÁPIDO PARA MARCAR TODAS LAS CASILLAS CON ADELANTO */}
                 <button
-                  onClick={selectAllWithAdvance}
-                  title="Marca la casilla de todos los pedidos que tienen adelanto en pantalla"
-                  className="bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-500/50 px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5"
+                  onClick={handleSelectWithAdvance}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition flex items-center gap-1.5 shadow-sm"
                 >
-                  <span>✓</span> Seleccionar c/ Adelanto
+                  <span>✓</span> Seleccionar c/ Adelanto ({metrics.ordersWithAdvanceCount})
                 </button>
               </div>
             </div>
@@ -727,7 +739,7 @@ export default function CodDashboard() {
               className="w-full bg-[#11141a] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
             />
 
-            {/* TABLA COMPACTA EN FILAS */}
+            {/* TABLA EN FILAS */}
             <div className="bg-[#11141a] border border-zinc-800 rounded-2xl overflow-x-auto shadow-2xl">
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
@@ -759,7 +771,7 @@ export default function CodDashboard() {
                     </tr>
                   ) : visibleOrders.length === 0 ? (
                     <tr>
-                      <td colSpan="11" className="py-8 text-center text-zinc-500">No hay pedidos en este periodo o filtro.</td>
+                      <td colSpan="11" className="py-8 text-center text-zinc-500">No hay pedidos con este filtro.</td>
                     </tr>
                   ) : (
                     visibleOrders.map((order) => {
@@ -775,9 +787,9 @@ export default function CodDashboard() {
 
                       let waMessage = '';
                       if (order.status === 'cancelado') {
-                        waMessage = `Hola ${order.customer_name}, te saludamos de la tienda respecto a tu pedido ${order.order_number}. Vimos que no se pudo concretar. ¿Deseas reprogramarlo con una facilidad de despacho? Quedamos atentos para ayudarte.`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos respecto a tu pedido ${order.order_number}. Vimos que no se pudo concretar. ¿Deseas reprogramarlo con una facilidad de entrega? Quedamos atentos para ayudarte.`;
                       } else if (order.zone === 'lima') {
-                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar la entrega de tu pedido ${order.order_number} por S/ ${balance.toFixed(2)}. El despacho es a domicilio (${order.address}, ${order.city}) con motorizado contraentrega. ¿Me confirmas si estás disponible hoy?`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar la entrega de tu pedido ${order.order_number} por S/ ${balance.toFixed(2)}. El despacho es a tu domicilio (${order.address}, ${order.city}) con motorizado contraentrega. ¿Me confirmas si estás disponible hoy?`;
                       } else {
                         waMessage = `Hola ${order.customer_name}, te saludamos para coordinar el envío de tu pedido ${order.order_number} a ${order.city} por Shalom contraentrega por S/ ${balance.toFixed(2)}. ¿Me confirmas tu DNI${order.customer_dni ? ` (${order.customer_dni})` : ''} y tu agencia Shalom de retiro?`;
                       }
@@ -822,7 +834,7 @@ export default function CodDashboard() {
                             </div>
                             <div className="text-[11px] text-zinc-500 truncate max-w-[170px]">{order.address}</div>
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-3 px-3">
                             {order.items && Array.isArray(order.items) ? (
                               <div className="text-[11px] text-zinc-300 space-y-0.5 max-w-[190px]">
                                 {order.items.map((it, idx) => (
@@ -1203,7 +1215,7 @@ export default function CodDashboard() {
               </div>
             </div>
 
-            {/* RESUMEN DE STOCK VENDIDO POR PRODUCTO */}
+            {/* RESUMEN DE STOCK VENDIDO */}
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-4">
               <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
                 Stock Vendido en este Periodo
