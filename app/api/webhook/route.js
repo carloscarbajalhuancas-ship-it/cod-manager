@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '../../../lib/supabase';
 
-// Prueba de conexión directa desde el navegador
 export async function GET() {
   const { count, error } = await supabase
     .from('orders')
@@ -13,7 +12,6 @@ export async function GET() {
   return NextResponse.json({ estado: 'Conexión exitosa con Supabase', total_pedidos: count });
 }
 
-// Receptor del webhook de pedidos de Shopify
 export async function POST(req) {
   try {
     const body = await req.json();
@@ -75,35 +73,56 @@ export async function POST(req) {
       variant: item.variant_title || '',
     }));
 
-    const { error } = await supabase.from('orders').upsert(
-      {
-        shopify_order_id: orderId,
-        order_number: orderNumber,
-        customer_name: customerName,
-        customer_dni: dni || null,
-        phone: phone,
-        city: city,
-        address: address,
-        zone: zone,
-        delivery_type: deliveryType,
-        courier: zone === 'lima' ? 'motorizado' : 'shalom',
-        total_amount: totalAmount,
-        advance_payment: 0.00,
-        status: 'pendiente',
-        items: items,
-        order_hour: orderHour,
-      },
-      { onConflict: 'shopify_order_id' }
-    );
+    const orderData = {
+      shopify_order_id: orderId,
+      order_number: orderNumber,
+      customer_name: customerName,
+      customer_dni: dni || null,
+      phone: phone,
+      city: city,
+      address: address,
+      zone: zone,
+      delivery_type: deliveryType,
+      courier: zone === 'lima' ? 'motorizado' : 'shalom',
+      total_amount: totalAmount,
+      advance_payment: 0.00,
+      status: 'pendiente',
+      items: items,
+      order_hour: orderHour,
+    };
 
-    if (error) {
-      console.error('Error en Supabase:', error);
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    // 1. Verificar si el pedido ya existe en la base de datos
+    const { data: existing } = await supabase
+      .from('orders')
+      .select('id')
+      .eq('shopify_order_id', orderId)
+      .maybeSingle();
+
+    let dbError = null;
+
+    if (existing) {
+      // 2. Si ya existe, se actualiza
+      const { error } = await supabase
+        .from('orders')
+        .update(orderData)
+        .eq('shopify_order_id', orderId);
+      dbError = error;
+    } else {
+      // 3. Si no existe, se inserta directamente
+      const { error } = await supabase
+        .from('orders')
+        .insert([orderData]);
+      dbError = error;
+    }
+
+    if (dbError) {
+      console.error('Error al guardar en Supabase:', dbError);
+      return NextResponse.json({ error: dbError.message }, { status: 500 });
     }
 
     return NextResponse.json({ ok: true, order: orderNumber }, { status: 200 });
   } catch (err) {
-    console.error('Error webhook:', err);
+    console.error('Error procesando webhook:', err);
     return NextResponse.json({ error: err.message }, { status: 400 });
   }
 }
