@@ -170,7 +170,6 @@ export default function CodDashboard() {
     let newStatus = order.status;
     let shouldDeductStock = false;
 
-    // Si colocó adelanto y estaba pendiente, se pasa a Confirmado en automático
     if (advance > 0 && order.status === 'pendiente') {
       newStatus = 'confirmado';
       shouldDeductStock = true;
@@ -254,7 +253,6 @@ export default function CodDashboard() {
     const advance = parseFloat(editingOrder.advance_payment) || 0;
     let targetStatus = editingOrder.status;
 
-    // Si en el modal puso adelanto y seguía pendiente, pasa a confirmado
     if (advance > 0 && targetStatus === 'pendiente') {
       targetStatus = 'confirmado';
     }
@@ -506,13 +504,21 @@ export default function CodDashboard() {
     <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
 
-        {/* HEADER & NAVEGACIÓN */}
+        {/* HEADER PERSONALIZADO & NAVEGACIÓN */}
         <header className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
           <div>
-            <h1 className="text-xl font-black text-white flex items-center gap-2">
-              COD MANAGER <span className="text-emerald-400 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">PERÚ COD</span>
-            </h1>
-            <p className="text-xs text-zinc-400 mt-0.5">Control de despachos, mesa de empaque, stock vivo y rentabilidad</p>
+            <div className="flex items-center gap-3">
+              <h1 className="text-xl font-black text-white tracking-tight">
+                ¡Hola Carlos! Así vamos hoy 👋
+              </h1>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                EN VIVO
+              </span>
+            </div>
+            <p className="text-xs text-zinc-400 mt-1">
+              Monitoreo de pedidos, despachos y dinero en mano
+            </p>
           </div>
 
           <div className="flex bg-zinc-900/90 p-1 rounded-xl border border-zinc-800">
@@ -879,7 +885,7 @@ export default function CodDashboard() {
                             S/ {total.toFixed(2)}
                           </td>
 
-                          {/* CASILLA DE ADELANTO INLINE EDITABLE (AUTO-CONFIRMA) */}
+                          {/* CASILLA DE ADELANTO INLINE (AUTO-CONFIRMA) */}
                           <td className="py-3 px-3 text-right font-mono">
                             <div className="flex items-center justify-end gap-1">
                               <span className="text-amber-500 text-[10px] font-bold">S/</span>
