@@ -6,7 +6,10 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="es">
-      <body className="bg-zinc-950 text-zinc-100 min-h-screen">
+      <head>
+        <script src="https://cdn.tailwindcss.com"></script>
+      </head>
+      <body className="bg-[#0d0f12] text-zinc-100 min-h-screen">
         {children}
       </body>
     </html>
