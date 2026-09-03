@@ -8,6 +8,9 @@ export default function CodDashboard() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // Selección masiva
+  const [selectedOrders, setSelectedOrders] = useState([]);
+
   // Filtros de fecha
   const [datePreset, setDatePreset] = useState('hoy'); // 'hoy' | 'ayer' | '7dias' | 'mes' | 'todos' | 'personalizado'
   const [customStart, setCustomStart] = useState('');
@@ -37,7 +40,6 @@ export default function CodDashboard() {
       setFleteLima(localStorage.getItem('cod_flete_lima') || '12');
       setFleteProv(localStorage.getItem('cod_flete_prov') || '15');
       
-      // Inicializar fechas para rango personalizado
       const todayStr = new Date().toISOString().split('T')[0];
       setCustomStart(todayStr);
       setCustomEnd(todayStr);
@@ -66,7 +68,7 @@ export default function CodDashboard() {
     fetchData();
 
     const channel = supabase
-      .channel('realtime_dashboard_full')
+      .channel('realtime_dashboard_bulk')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
       .subscribe();
@@ -88,7 +90,6 @@ export default function CodDashboard() {
       if (datePreset === 'hoy') {
         return orderDate >= startOfToday && orderDate <= endOfToday;
       }
-
       if (datePreset === 'ayer') {
         const startOfYesterday = new Date(startOfToday);
         startOfYesterday.setDate(startOfYesterday.getDate() - 1);
@@ -96,18 +97,15 @@ export default function CodDashboard() {
         endOfYesterday.setMilliseconds(-1);
         return orderDate >= startOfYesterday && orderDate <= endOfYesterday;
       }
-
       if (datePreset === '7dias') {
         const sevenDaysAgo = new Date(startOfToday);
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
         return orderDate >= sevenDaysAgo && orderDate <= endOfToday;
       }
-
       if (datePreset === 'mes') {
         const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0);
         return orderDate >= startOfMonth && orderDate <= endOfToday;
       }
-
       if (datePreset === 'personalizado') {
         if (!customStart) return true;
         const [sYear, sMonth, sDay] = customStart.split('-').map(Number);
@@ -120,13 +118,11 @@ export default function CodDashboard() {
         }
         return orderDate >= startDate && orderDate <= endDate;
       }
-
       return true;
     });
   }, [orders, datePreset, customStart, customEnd]);
 
   // ================= AJUSTE DINÁMICO DE STOCK =================
-  // multiplier = -1 resta stock | multiplier = +1 restaura stock
   const adjustStock = async (items, multiplier) => {
     if (!items || !Array.isArray(items)) return;
 
@@ -146,20 +142,68 @@ export default function CodDashboard() {
     }
   };
 
+  // Actualizar un pedido individual
   const updateOrderStatus = async (order, newStatus) => {
     const isOldConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
     const isNewConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(newStatus);
 
-    // Caso 1: Se confirma un pedido pendiente o cancelado -> Descontar stock
     if (!isOldConfirmed && isNewConfirmed) {
       await adjustStock(order.items, -1);
-    }
-    // Caso 2: Se cancela un pedido previamente confirmado -> Devolver stock
-    else if (isOldConfirmed && !isNewConfirmed) {
+    } else if (isOldConfirmed && !isNewConfirmed) {
       await adjustStock(order.items, 1);
     }
 
-    await supabase.from('orders').update({ status: newStatus }).eq('id', order.id);
+    const payload = { status: newStatus };
+    // AUTOCOMPLETAR SALDO SI SE ENTREGA
+    if (newStatus === 'entregado') {
+      payload.advance_payment = parseFloat(order.total_amount) || 0;
+    }
+
+    await supabase.from('orders').update(payload).eq('id', order.id);
+    fetchData();
+  };
+
+  // ================= ACCIONES MASIVAS =================
+  const handleBulkStatusChange = async (newStatus) => {
+    if (!newStatus || selectedOrders.length === 0) return;
+
+    const targets = orders.filter((o) => selectedOrders.includes(o.id));
+
+    for (const order of targets) {
+      const isOldConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
+      const isNewConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(newStatus);
+
+      if (!isOldConfirmed && isNewConfirmed) {
+        await adjustStock(order.items, -1);
+      } else if (isOldConfirmed && !isNewConfirmed) {
+        await adjustStock(order.items, 1);
+      }
+
+      const payload = { status: newStatus };
+      // AUTOCOMPLETAR SALDO MASIVO
+      if (newStatus === 'entregado') {
+        payload.advance_payment = parseFloat(order.total_amount) || 0;
+      }
+
+      await supabase.from('orders').update(payload).eq('id', order.id);
+    }
+
+    setSelectedOrders([]);
+    fetchData();
+  };
+
+  const handleBulkDelete = async () => {
+    if (!confirm(`¿Eliminar definitivamente los ${selectedOrders.length} pedidos seleccionados?`)) return;
+
+    const targets = orders.filter((o) => selectedOrders.includes(o.id));
+    for (const order of targets) {
+      if (['confirmado', 'en_ruta', 'entregado'].includes(order.status)) {
+        await adjustStock(order.items, 1);
+      }
+      await supabase.from('orders').delete().eq('id', order.id);
+    }
+
+    setSelectedOrders([]);
     fetchData();
   };
 
@@ -171,6 +215,7 @@ export default function CodDashboard() {
     }
 
     await supabase.from('orders').delete().eq('id', id);
+    setSelectedOrders((prev) => prev.filter((item) => item !== id));
     fetchData();
   };
 
@@ -189,21 +234,21 @@ export default function CodDashboard() {
       if (isOldConf && !isNewConf) await adjustStock(original.items, 1);
     }
 
-    await supabase
-      .from('orders')
-      .update({
-        customer_name: editingOrder.customer_name,
-        phone: editingOrder.phone,
-        city: editingOrder.city,
-        address: editingOrder.address,
-        customer_dni: editingOrder.customer_dni,
-        zone: editingOrder.zone,
-        total_amount: parseFloat(editingOrder.total_amount) || 0,
-        advance_payment: parseFloat(editingOrder.advance_payment) || 0,
-        status: editingOrder.status,
-      })
-      .eq('id', editingOrder.id);
+    const payload = {
+      customer_name: editingOrder.customer_name,
+      phone: editingOrder.phone,
+      city: editingOrder.city,
+      address: editingOrder.address,
+      customer_dni: editingOrder.customer_dni,
+      zone: editingOrder.zone,
+      total_amount: parseFloat(editingOrder.total_amount) || 0,
+      advance_payment: editingOrder.status === 'entregado' 
+        ? (parseFloat(editingOrder.total_amount) || 0) 
+        : (parseFloat(editingOrder.advance_payment) || 0),
+      status: editingOrder.status,
+    };
 
+    await supabase.from('orders').update(payload).eq('id', editingOrder.id);
     setEditingOrder(null);
     fetchData();
   };
@@ -244,18 +289,15 @@ export default function CodDashboard() {
     const canceledOrders = dateFilteredOrders.filter((o) => o.status === 'cancelado');
     const pendingOrders = dateFilteredOrders.filter((o) => o.status === 'pendiente');
 
-    // 1. DINERO RECIBIDO EN ADELANTOS (Yape/Plin ya en banco del periodo)
     const adelantosRecibidos = dateFilteredOrders
       .filter((o) => o.status !== 'cancelado')
       .reduce((acc, o) => acc + (parseFloat(o.advance_payment) || 0), 0);
 
-    // 2. SALDO PENDIENTE POR COBRAR (Dinero "en la calle" entre motorizado y Shalom)
     const saldoEnLaCalle = inTransitOrders.reduce((acc, o) => {
       const balance = (parseFloat(o.total_amount) || 0) - (parseFloat(o.advance_payment) || 0);
       return acc + Math.max(0, balance);
     }, 0);
 
-    // 3. DINERO LIQUIDADO (Entregas efectivas cobradas al 100%)
     const dineroLiquidado = deliveredOrders.reduce(
       (acc, o) => acc + (parseFloat(o.total_amount) || 0),
       0
@@ -270,7 +312,6 @@ export default function CodDashboard() {
     const fLima = parseFloat(fleteLima) || 0;
     const fProv = parseFloat(fleteProv) || 0;
 
-    // Costo de mercadería de pedidos confirmados
     const totalCOGS = confirmedOrders.reduce((acc, o) => {
       if (o.items && Array.isArray(o.items) && o.items.length > 0) {
         return (
@@ -289,26 +330,22 @@ export default function CodDashboard() {
       return acc + 25;
     }, 0);
 
-    // Costo total de flete
     const totalShipping = confirmedOrders.reduce(
       (acc, o) => acc + (o.zone === 'lima' ? fLima : fProv),
       0
     );
 
-    // Inversión Total & Ganancia Neta Real
     const totalInvestment = spend + totalCOGS + totalShipping;
     const netProfit = confirmedRevenue - totalInvestment;
     const marginPct = confirmedRevenue > 0 ? ((netProfit / confirmedRevenue) * 100).toFixed(1) : 0;
     const roi = totalInvestment > 0 ? ((netProfit / totalInvestment) * 100).toFixed(1) : 0;
 
-    // Ratios Publicitarios
     const closingRate = totalShopifyOrders > 0 ? ((confirmedOrders.length / totalShopifyOrders) * 100).toFixed(1) : 0;
     const cpaAds = totalShopifyOrders > 0 && spend > 0 ? (spend / totalShopifyOrders).toFixed(2) : '0.00';
     const cpaReal = confirmedOrders.length > 0 && spend > 0 ? (spend / confirmedOrders.length).toFixed(2) : '0.00';
     const roas = spend > 0 ? (confirmedRevenue / spend).toFixed(2) : '0.00';
     const aov = confirmedOrders.length > 0 ? confirmedRevenue / confirmedOrders.length : 0;
 
-    // Stock vendido por producto en el periodo
     const soldByProduct = {};
     confirmedOrders.forEach((o) => {
       if (o.items && Array.isArray(o.items)) {
@@ -361,17 +398,32 @@ export default function CodDashboard() {
     return matchSearch && matchStatus && matchZone;
   });
 
+  // Manejadores de selección masiva
+  const toggleSelectAll = () => {
+    if (selectedOrders.length === visibleOrders.length && visibleOrders.length > 0) {
+      setSelectedOrders([]);
+    } else {
+      setSelectedOrders(visibleOrders.map((o) => o.id));
+    }
+  };
+
+  const toggleSelectOne = (id) => {
+    setSelectedOrders((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
   return (
     <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
 
-        {/* HEADER SUPERIOR & SELECTOR DE PESTAÑAS */}
+        {/* HEADER & NAVEGACIÓN */}
         <header className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
           <div>
             <h1 className="text-xl font-black text-white flex items-center gap-2">
               COD MANAGER <span className="text-emerald-400 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">PERÚ COD</span>
             </h1>
-            <p className="text-xs text-zinc-400 mt-0.5">Control de despachos, stock vivo, flujo de caja y rentabilidad real</p>
+            <p className="text-xs text-zinc-400 mt-0.5">Control masivo de pedidos, inventario vivo y rentabilidad neta</p>
           </div>
 
           <div className="flex bg-zinc-900/90 p-1 rounded-xl border border-zinc-800">
@@ -402,9 +454,8 @@ export default function CodDashboard() {
           </div>
         </header>
 
-        {/* ================= BARRA INTELIGENTE DE FECHAS (PRESETS + RANGO PERSONALIZADO) ================= */}
-        <section className="bg-[#11141a] p-4 rounded-2xl border border-zinc-800/90 flex flex-col md:flex-row items-center justify-between gap-3 shadow-lg">
-          {/* Botones de Presets */}
+        {/* BARRA DE FECHAS (PRESETS + RANGO) */}
+        <section className="bg-[#11141a] p-4 rounded-2xl border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-3 shadow-lg">
           <div className="flex flex-wrap items-center gap-1.5 w-full md:w-auto">
             <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-500 mr-1.5">Periodo:</span>
             {[
@@ -429,9 +480,8 @@ export default function CodDashboard() {
             ))}
           </div>
 
-          {/* Inputs para Rango Personalizado */}
           {datePreset === 'personalizado' && (
-            <div className="flex items-center gap-2 bg-zinc-950 px-3 py-1.5 rounded-xl border border-zinc-700/80 w-full md:w-auto">
+            <div className="flex items-center gap-2 bg-zinc-950 px-3 py-1.5 rounded-xl border border-zinc-700 w-full md:w-auto">
               <div className="flex items-center gap-1 text-xs">
                 <span className="text-zinc-500 text-[10px] uppercase font-bold">Desde:</span>
                 <input
@@ -455,10 +505,68 @@ export default function CodDashboard() {
         </section>
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 1: BANDEJA DE VENTAS EN LÍNEA                                     */}
+        {/* SECCIÓN 1: BANDEJA DE VENTAS CON SELECCIÓN MASIVA                         */}
         {/* ========================================================================= */}
         {activeTab === 'ventas' && (
           <section className="space-y-4">
+            
+            {/* BARRA DE ACCIÓN MASIVA (APARECE CUANDO SE SELECCIONAN PEDIDOS) */}
+            {selectedOrders.length > 0 && (
+              <div className="bg-gradient-to-r from-emerald-950/90 via-[#161b24] to-[#161b24] border-2 border-emerald-500/80 p-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-2xl animate-pulse">
+                <div className="flex items-center gap-2">
+                  <span className="bg-emerald-500 text-zinc-950 font-black px-2.5 py-0.5 rounded-full text-xs">
+                    {selectedOrders.length}
+                  </span>
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">
+                    pedidos seleccionados
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] text-zinc-400 font-bold uppercase">Cambiar a:</span>
+                  <button
+                    onClick={() => handleBulkStatusChange('confirmado')}
+                    className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition"
+                  >
+                    Confirmados
+                  </button>
+                  <button
+                    onClick={() => handleBulkStatusChange('en_ruta')}
+                    className="bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition"
+                  >
+                    En Ruta
+                  </button>
+                  <button
+                    onClick={() => handleBulkStatusChange('entregado')}
+                    title="Al entregar, el saldo pendiente se liquida a S/ 0.00 en automático"
+                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition border border-emerald-400 shadow-md"
+                  >
+                    Entregados (Liquidar 100%)
+                  </button>
+                  <button
+                    onClick={() => handleBulkStatusChange('cancelado')}
+                    className="bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition"
+                  >
+                    Cancelados
+                  </button>
+
+                  <button
+                    onClick={handleBulkDelete}
+                    className="bg-zinc-800 hover:bg-rose-950 text-rose-400 font-bold text-xs px-2.5 py-1.5 rounded-lg border border-rose-900/40 ml-2"
+                  >
+                    🗑️ Borrar
+                  </button>
+
+                  <button
+                    onClick={() => setSelectedOrders([])}
+                    className="text-xs text-zinc-400 hover:text-white underline ml-2"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* FILTROS POR ESTADO */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-[#11141a] p-3 rounded-xl border border-zinc-800">
               <div className="flex flex-wrap gap-1.5">
@@ -508,70 +616,92 @@ export default function CodDashboard() {
               className="w-full bg-[#11141a] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
             />
 
-            {/* TABLA COMPACTA */}
+            {/* TABLA COMPACTA CON CASILLAS DE SELECCIÓN */}
             <div className="bg-[#11141a] border border-zinc-800 rounded-2xl overflow-x-auto shadow-2xl">
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
                   <tr className="border-b border-zinc-800 bg-zinc-950/60 text-zinc-400 font-bold uppercase tracking-wider text-[10px]">
-                    <th className="py-3.5 px-4">#Orden</th>
-                    <th className="py-3.5 px-4">Fecha</th>
-                    <th className="py-3.5 px-4">Cliente</th>
-                    <th className="py-3.5 px-4">Destino / Zona</th>
-                    <th className="py-3.5 px-4">Productos</th>
-                    <th className="py-3.5 px-4 text-right">Total</th>
-                    <th className="py-3.5 px-4 text-right">Adelanto</th>
-                    <th className="py-3.5 px-4 text-right">Saldo</th>
-                    <th className="py-3.5 px-4">Estado</th>
-                    <th className="py-3.5 px-4 text-center">Acciones</th>
+                    <th className="py-3.5 px-3 text-center">
+                      <input
+                        type="checkbox"
+                        checked={visibleOrders.length > 0 && selectedOrders.length === visibleOrders.length}
+                        onChange={toggleSelectAll}
+                        className="w-4 h-4 rounded accent-emerald-500 cursor-pointer"
+                      />
+                    </th>
+                    <th className="py-3.5 px-3">#Orden</th>
+                    <th className="py-3.5 px-3">Fecha</th>
+                    <th className="py-3.5 px-3">Cliente</th>
+                    <th className="py-3.5 px-3">Destino / Zona</th>
+                    <th className="py-3.5 px-3">Productos</th>
+                    <th className="py-3.5 px-3 text-right">Total</th>
+                    <th className="py-3.5 px-3 text-right">Adelanto</th>
+                    <th className="py-3.5 px-3 text-right">Saldo Restante</th>
+                    <th className="py-3.5 px-3">Estado</th>
+                    <th className="py-3.5 px-3 text-center">Acciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-800/60">
                   {loading ? (
                     <tr>
-                      <td colSpan="10" className="py-8 text-center text-zinc-500">Cargando despachos...</td>
+                      <td colSpan="11" className="py-8 text-center text-zinc-500">Cargando despachos...</td>
                     </tr>
                   ) : visibleOrders.length === 0 ? (
                     <tr>
-                      <td colSpan="10" className="py-8 text-center text-zinc-500">No hay pedidos en el periodo seleccionado.</td>
+                      <td colSpan="11" className="py-8 text-center text-zinc-500">No hay pedidos en este periodo.</td>
                     </tr>
                   ) : (
                     visibleOrders.map((order) => {
                       const total = parseFloat(order.total_amount || 0);
                       const advance = parseFloat(order.advance_payment || 0);
-                      const balance = total - advance;
+                      const balance = Math.max(0, total - advance);
+                      const isDelivered = order.status === 'entregado';
                       const cleanPhone = (order.phone || '').replace(/\D/g, '');
 
-                      // Formato de Fecha / Hora
                       const dateObj = new Date(order.created_at || Date.now());
                       const dateStr = dateObj.toLocaleDateString('es-PE', { day: '2-digit', month: '2-digit' });
                       const timeStr = dateObj.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', hour12: true });
 
-                      // Mensajes de WhatsApp
                       let waMessage = '';
                       if (order.status === 'cancelado') {
-                        waMessage = `Hola ${order.customer_name}, te saludamos respecto a tu pedido ${order.order_number}. Vimos que no pudiste concretarlo. ¿Tuviste algún problema o deseas reprogramarlo con una facilidad de entrega? Quedamos atentos para ayudarte.`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos de la tienda respecto a tu pedido ${order.order_number}. Vimos que no se pudo entregar. ¿Deseas reprogramarlo con una facilidad de despacho? Quedamos atentos para ayudarte.`;
                       } else if (order.zone === 'lima') {
-                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar la entrega de tu pedido ${order.order_number} por S/ ${balance.toFixed(2)}. El despacho es a tu domicilio (${order.address}, ${order.city}) con motorizado contraentrega. ¿Me confirmas si estás disponible hoy?`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar la entrega de tu pedido ${order.order_number} por S/ ${balance.toFixed(2)}. El despacho es a domicilio (${order.address}, ${order.city}) con motorizado contraentrega. ¿Me confirmas si estás disponible hoy?`;
                       } else {
-                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar el envío de tu pedido ${order.order_number} a ${order.city} por Shalom contraentrega por S/ ${balance.toFixed(2)}. ¿Me confirmas tu DNI${order.customer_dni ? ` (${order.customer_dni})` : ''} y tu agencia de preferencia?`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar el envío de tu pedido ${order.order_number} a ${order.city} por Shalom contraentrega por S/ ${balance.toFixed(2)}. ¿Me confirmas tu DNI${order.customer_dni ? ` (${order.customer_dni})` : ''} y tu agencia Shalom de retiro?`;
                       }
 
                       const waUrl = `https://wa.me/51${cleanPhone}?text=${encodeURIComponent(waMessage)}`;
 
                       return (
-                        <tr key={order.id} className="hover:bg-zinc-900/40 transition">
-                          <td className="py-3 px-4 font-mono font-bold text-white whitespace-nowrap">
+                        <tr
+                          key={order.id}
+                          className={`hover:bg-zinc-900/40 transition ${
+                            selectedOrders.includes(order.id) ? 'bg-emerald-950/20' : ''
+                          }`}
+                        >
+                          {/* CHECKBOX INDIVIDUAL */}
+                          <td className="py-3 px-3 text-center">
+                            <input
+                              type="checkbox"
+                              checked={selectedOrders.includes(order.id)}
+                              onChange={() => toggleSelectOne(order.id)}
+                              className="w-4 h-4 rounded accent-emerald-500 cursor-pointer"
+                            />
+                          </td>
+
+                          <td className="py-3 px-3 font-mono font-bold text-white whitespace-nowrap">
                             {order.order_number}
                           </td>
-                          <td className="py-3 px-4 font-mono text-[11px] text-zinc-400 whitespace-nowrap">
+                          <td className="py-3 px-3 font-mono text-[11px] text-zinc-400 whitespace-nowrap">
                             <div>{dateStr}</div>
                             <div className="text-[10px] text-zinc-500">{timeStr}</div>
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-3 px-3">
                             <div className="font-bold text-white leading-snug">{order.customer_name}</div>
                             <div className="text-[11px] text-zinc-400 font-mono">{order.phone}</div>
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-3 px-3">
                             <div className="flex items-center gap-1.5">
                               <span className={`px-2 py-0.5 rounded text-[9px] font-extrabold uppercase ${
                                 order.zone === 'lima' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/20' : 'bg-purple-500/10 text-purple-400 border border-purple-500/20'
@@ -582,9 +712,9 @@ export default function CodDashboard() {
                             </div>
                             <div className="text-[11px] text-zinc-500 truncate max-w-[170px]">{order.address}</div>
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-3 px-3">
                             {order.items && Array.isArray(order.items) ? (
-                              <div className="text-[11px] text-zinc-300 space-y-0.5 max-w-[200px]">
+                              <div className="text-[11px] text-zinc-300 space-y-0.5 max-w-[190px]">
                                 {order.items.map((it, idx) => (
                                   <div key={idx} className="truncate">
                                     • {it.title} <span className="font-bold text-emerald-400">x{it.quantity}</span>
@@ -595,16 +725,27 @@ export default function CodDashboard() {
                               <span className="text-zinc-500 text-[11px]">-</span>
                             )}
                           </td>
-                          <td className="py-3 px-4 text-right font-mono text-zinc-300">
+                          <td className="py-3 px-3 text-right font-mono text-zinc-300">
                             S/ {total.toFixed(2)}
                           </td>
-                          <td className="py-3 px-4 text-right font-mono text-amber-400">
+                          <td className="py-3 px-3 text-right font-mono text-amber-400">
                             S/ {advance.toFixed(2)}
                           </td>
-                          <td className="py-3 px-4 text-right font-mono font-bold text-emerald-400 whitespace-nowrap">
-                            S/ {balance.toFixed(2)}
+                          
+                          {/* SALDO RESTANTE (SI ES ENTREGADO, SE AUTOCOMPLETA COMO LIQUIDADO) */}
+                          <td className="py-3 px-3 text-right font-mono font-bold whitespace-nowrap">
+                            {isDelivered ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-extrabold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                                ✓ S/ 0.00 (Liquidado)
+                              </span>
+                            ) : (
+                              <span className="text-emerald-400">
+                                S/ {balance.toFixed(2)}
+                              </span>
+                            )}
                           </td>
-                          <td className="py-3 px-4">
+
+                          <td className="py-3 px-3">
                             <select
                               value={order.status || 'pendiente'}
                               onChange={(e) => updateOrderStatus(order, e.target.value)}
@@ -623,11 +764,11 @@ export default function CodDashboard() {
                               <option value="pendiente">Pendiente</option>
                               <option value="confirmado">Confirmado</option>
                               <option value="en_ruta">En ruta</option>
-                              <option value="entregado">Entregado</option>
+                              <option value="entregado">Entregado (Liquidar)</option>
                               <option value="cancelado">Cancelado</option>
                             </select>
                           </td>
-                          <td className="py-3 px-4">
+                          <td className="py-3 px-3">
                             <div className="flex items-center justify-center gap-1.5">
                               <a
                                 href={waUrl}
@@ -675,7 +816,7 @@ export default function CodDashboard() {
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-zinc-800 pb-3">
                 <div>
                   <h3 className="text-sm font-bold text-white uppercase tracking-wider">Inventario Físico & Costo de Compra</h3>
-                  <p className="text-xs text-zinc-400">El stock se resta al Confirmar y <strong>se devuelve automáticamente si se Cancela o Elimina</strong>.</p>
+                  <p className="text-xs text-zinc-400">El stock se resta al Confirmar y se devuelve si se Cancela o Elimina.</p>
                 </div>
 
                 <form onSubmit={addProduct} className="flex flex-wrap gap-2">
@@ -799,7 +940,7 @@ export default function CodDashboard() {
                           >
                             <option value="confirmado">Confirmado</option>
                             <option value="en_ruta">En ruta</option>
-                            <option value="entregado">Entregado</option>
+                            <option value="entregado">Entregado (Liquidar)</option>
                           </select>
                         </div>
                       </div>
@@ -815,7 +956,6 @@ export default function CodDashboard() {
         {/* ========================================================================= */}
         {activeTab === 'metricas' && (
           <section className="space-y-6">
-            {/* PARÁMETROS DE COSTO */}
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-3">
               <h3 className="text-xs font-bold uppercase text-zinc-400 tracking-wider">Configuración Financiera del Periodo</h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -861,14 +1001,14 @@ export default function CodDashboard() {
               </div>
             </div>
 
-            {/* CONTROL DE FLUJO DE CAJA (ADELANTOS & SALDO EN LA CALLE) */}
+            {/* FLUJO DE CAJA & LIQUIDACIÓN */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-[#11141a] border border-amber-500/40 p-5 rounded-2xl">
                 <span className="text-[10px] font-bold uppercase text-amber-400 block">Adelantos Recibidos (Yape / Plin)</span>
                 <span className="text-3xl font-black text-amber-300 font-mono block mt-1">
                   S/ {metrics.adelantosRecibidos.toFixed(2)}
                 </span>
-                <p className="text-[11px] text-zinc-400 mt-1">Dinero cobrado por adelantado ya en tu cuenta</p>
+                <p className="text-[11px] text-zinc-400 mt-1">Cobros adelantados ya seguros en tu cuenta</p>
               </div>
 
               <div className="bg-[#11141a] border border-blue-500/40 p-5 rounded-2xl">
@@ -876,19 +1016,19 @@ export default function CodDashboard() {
                 <span className="text-3xl font-black text-blue-300 font-mono block mt-1">
                   S/ {metrics.saldoEnLaCalle.toFixed(2)}
                 </span>
-                <p className="text-[11px] text-zinc-400 mt-1">En manos de motorizado y Shalom ({metrics.inTransitCount} pedidos)</p>
+                <p className="text-[11px] text-zinc-400 mt-1">En manos de motorizado y agencias ({metrics.inTransitCount} pedidos)</p>
               </div>
 
               <div className="bg-[#11141a] border border-emerald-500/40 p-5 rounded-2xl">
-                <span className="text-[10px] font-bold uppercase text-emerald-400 block">Dinero Entregado & Liquidado</span>
+                <span className="text-[10px] font-bold uppercase text-emerald-400 block">Dinero Liquidado (Entregado)</span>
                 <span className="text-3xl font-black text-emerald-300 font-mono block mt-1">
                   S/ {metrics.dineroLiquidado.toFixed(2)}
                 </span>
-                <p className="text-[11px] text-zinc-400 mt-1">Ventas cobradas al 100% ({metrics.deliveredCount} entregados)</p>
+                <p className="text-[11px] text-zinc-400 mt-1">Total cerrado de entregas ({metrics.deliveredCount} pedidos)</p>
               </div>
             </div>
 
-            {/* GRILLA DE LAS 8 MÉTRICAS PRINCIPALES */}
+            {/* LAS 8 MÉTRICAS OPERATIVAS */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               <div className="bg-[#11141a] border border-zinc-800 p-4 rounded-2xl">
                 <span className="text-[10px] font-bold uppercase text-zinc-400 block">Pedidos Shopify (Entrantes)</span>
