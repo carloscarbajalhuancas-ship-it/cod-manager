@@ -1,14 +1,21 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '../../../lib/supabase';
 
-export async function GET() {
-  const { count, error } = await supabase
-    .from('orders')
-    .select('*', { count: 'exact', head: true });
+// Diccionario de distritos y abreviaturas de Lima y Callao
+const LIMA_DISTRICTS = [
+  'lima', 'callao', 'sjl', 'san juan de lurigancho', 'smp', 'san martin de porres',
+  'ves', 'villa el salvador', 'vmt', 'villa maria del triunfo', 'ate', 'vitarte',
+  'comas', 'los olivos', 'surco', 'santiago de surco', 'miraflores', 'san borja',
+  'la molina', 'independencia', 'san miguel', 'pueblo libre', 'magdalena',
+  'jesus maria', 'lince', 'brena', 'breña', 'rimac', 'chorrillos', 'bellavista',
+  'la perla', 'carmen de la legua', 'ventanilla', 'santa anita', 'puente piedra',
+  'carabayllo', 'lurin', 'pachacamac', 'san luis', 'la victoria', 'el agustino',
+  'barranco', 'surquillo', 'santa rosa', 'ancón', 'ancon', 'chaclacayo', 'chosica', 'cieneguilla'
+];
 
-  if (error) {
-    return NextResponse.json({ estado: 'Error en Supabase', detalle: error.message }, { status: 500 });
-  }
+export async function GET() {
+  const { count, error } = await supabase.from('orders').select('*', { count: 'exact', head: true });
+  if (error) return NextResponse.json({ estado: 'Error en Supabase', detalle: error.message }, { status: 500 });
   return NextResponse.json({ estado: 'Conexión exitosa con Supabase', total_pedidos: count });
 }
 
@@ -28,28 +35,13 @@ export async function POST(req) {
       `${shipping.last_name || billing.last_name || customer.last_name || ''}`
     ).trim();
 
-    const phone =
-      shipping.phone ||
-      billing.phone ||
-      customer.phone ||
-      body.phone ||
-      'Sin teléfono';
+    const phone = shipping.phone || billing.phone || customer.phone || body.phone || 'Sin teléfono';
+    const city = shipping.city || billing.city || shipping.province || billing.province || 'Lima';
+    const address = shipping.address1 || billing.address1 || 'Entrega coordinada';
 
-    const city =
-      shipping.city ||
-      billing.city ||
-      shipping.province ||
-      billing.province ||
-      'Lima';
-
-    const address =
-      shipping.address1 ||
-      billing.address1 ||
-      'Entrega coordinada';
-
-    const cityNormalized = city.toLowerCase();
-    const isLima =
-      cityNormalized.includes('lima') || cityNormalized.includes('callao');
+    // Detección inteligente de zona (Lima vs Provincia)
+    const textToCheck = `${city} ${address}`.toLowerCase();
+    const isLima = LIMA_DISTRICTS.some((district) => textToCheck.includes(district));
     const zone = isLima ? 'lima' : 'provincia';
     const deliveryType = isLima ? 'domicilio' : 'agencia';
 
@@ -91,27 +83,14 @@ export async function POST(req) {
       order_hour: orderHour,
     };
 
-    // 1. Verificar si el pedido ya existe en la base de datos
-    const { data: existing } = await supabase
-      .from('orders')
-      .select('id')
-      .eq('shopify_order_id', orderId)
-      .maybeSingle();
+    const { data: existing } = await supabase.from('orders').select('id').eq('shopify_order_id', orderId).maybeSingle();
 
     let dbError = null;
-
     if (existing) {
-      // 2. Si ya existe, se actualiza
-      const { error } = await supabase
-        .from('orders')
-        .update(orderData)
-        .eq('shopify_order_id', orderId);
+      const { error } = await supabase.from('orders').update(orderData).eq('shopify_order_id', orderId);
       dbError = error;
     } else {
-      // 3. Si no existe, se inserta directamente
-      const { error } = await supabase
-        .from('orders')
-        .insert([orderData]);
+      const { error } = await supabase.from('orders').insert([orderData]);
       dbError = error;
     }
 
@@ -122,7 +101,7 @@ export async function POST(req) {
 
     return NextResponse.json({ ok: true, order: orderNumber }, { status: 200 });
   } catch (err) {
-    console.error('Error procesando webhook:', err);
+    console.error('Error webhook:', err);
     return NextResponse.json({ error: err.message }, { status: 400 });
   }
 }
