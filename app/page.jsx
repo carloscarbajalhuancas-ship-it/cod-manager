@@ -8,7 +8,7 @@ export default function CodDashboard() {
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Filtros de búsqueda y vista
+  // Filtros de búsqueda
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('todos');
   const [zoneFilter, setZoneFilter] = useState('todos');
@@ -16,12 +16,12 @@ export default function CodDashboard() {
   // Modal de edición
   const [editingOrder, setEditingOrder] = useState(null);
 
-  // Nuevo producto (Inventario)
+  // Formulario nuevo producto
   const [newProdName, setNewProdName] = useState('');
   const [newProdStock, setNewProdStock] = useState('');
   const [newProdCost, setNewProdCost] = useState('');
 
-  // Parámetros financieros
+  // Parámetros financieros en memoria local
   const [adSpend, setAdSpend] = useState('');
   const [fleteLima, setFleteLima] = useState('12');
   const [fleteProv, setFleteProv] = useState('15');
@@ -39,7 +39,7 @@ export default function CodDashboard() {
     localStorage.setItem(key, val);
   };
 
-  // Cargar pedidos y productos
+  // Cargar datos en vivo
   const fetchData = async () => {
     setLoading(true);
     const [ordersRes, productsRes] = await Promise.all([
@@ -56,7 +56,7 @@ export default function CodDashboard() {
     fetchData();
 
     const channel = supabase
-      .channel('realtime_all')
+      .channel('realtime_dashboard_full')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
       .subscribe();
@@ -64,32 +64,54 @@ export default function CodDashboard() {
     return () => supabase.removeChannel(channel);
   }, []);
 
-  // ================= OPERACIONES CRUD =================
-  const deleteOrder = async (id, orderNumber) => {
-    if (!confirm(`¿Eliminar definitivamente el pedido ${orderNumber}?`)) return;
-    await supabase.from('orders').delete().eq('id', id);
-    fetchData();
+  // ================= LÓGICA DE STOCK INTELIGENTE =================
+  // multiplier = -1 descuenta stock (al confirmar)
+  // multiplier = +1 restaura stock (si se cancela o vuelve a pendiente)
+  const adjustStock = async (items, multiplier) => {
+    if (!items || !Array.isArray(items)) return;
+
+    for (const item of items) {
+      const itemTitle = (item.title || '').toLowerCase().trim();
+      const matchedProd = products.find((p) => {
+        const pName = (p.name || '').toLowerCase().trim();
+        return pName === itemTitle || itemTitle.includes(pName) || pName.includes(itemTitle);
+      });
+
+      if (matchedProd) {
+        const currentStock = parseInt(matchedProd.stock) || 0;
+        const qty = parseInt(item.quantity) || 1;
+        const newStock = Math.max(0, currentStock + (qty * multiplier));
+        await supabase.from('products').update({ stock: newStock }).eq('id', matchedProd.id);
+      }
+    }
   };
 
   const updateOrderStatus = async (order, newStatus) => {
-    // Descuento automático de inventario al confirmar el pedido
-    if (newStatus === 'confirmado' && order.status !== 'confirmado') {
-      if (order.items && Array.isArray(order.items)) {
-        for (const item of order.items) {
-          const matchedProd = products.find(
-            (p) => p.name.toLowerCase() === (item.title || '').toLowerCase()
-          );
-          if (matchedProd) {
-            const currentStock = parseInt(matchedProd.stock) || 0;
-            const qtyToDeduct = parseInt(item.quantity) || 1;
-            const updatedStock = Math.max(0, currentStock - qtyToDeduct);
-            await supabase.from('products').update({ stock: updatedStock }).eq('id', matchedProd.id);
-          }
-        }
-      }
+    const isOldConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
+    const isNewConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(newStatus);
+
+    // Caso 1: Estaba pendiente/cancelado y se confirma -> Descontar stock
+    if (!isOldConfirmed && isNewConfirmed) {
+      await adjustStock(order.items, -1);
+    }
+    // Caso 2: Estaba confirmado y pasa a cancelado o pendiente -> Devolver stock
+    else if (isOldConfirmed && !isNewConfirmed) {
+      await adjustStock(order.items, 1);
     }
 
     await supabase.from('orders').update({ status: newStatus }).eq('id', order.id);
+    fetchData();
+  };
+
+  const deleteOrder = async (id, orderNumber, orderStatus, orderItems) => {
+    if (!confirm(`¿Eliminar definitivamente el pedido ${orderNumber}?`)) return;
+    
+    // Si estaba confirmado y se elimina, devolvemos el stock al almacén
+    if (['confirmado', 'en_ruta', 'entregado'].includes(orderStatus)) {
+      await adjustStock(orderItems, 1);
+    }
+
+    await supabase.from('orders').delete().eq('id', id);
     fetchData();
   };
 
@@ -100,6 +122,14 @@ export default function CodDashboard() {
 
   const saveEditedOrder = async (e) => {
     e.preventDefault();
+    const original = orders.find((o) => o.id === editingOrder.id);
+    if (original && original.status !== editingOrder.status) {
+      const isOldConf = ['confirmado', 'en_ruta', 'entregado'].includes(original.status);
+      const isNewConf = ['confirmado', 'en_ruta', 'entregado'].includes(editingOrder.status);
+      if (!isOldConf && isNewConf) await adjustStock(original.items, -1);
+      if (isOldConf && !isNewConf) await adjustStock(original.items, 1);
+    }
+
     await supabase
       .from('orders')
       .update({
@@ -119,7 +149,7 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // ================= INVENTARIO =================
+  // ================= GESTIÓN DE PRODUCTOS =================
   const addProduct = async (e) => {
     e.preventDefault();
     if (!newProdName) return;
@@ -146,79 +176,98 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // ================= MÉTRICAS UNIT ECONOMICS =================
+  // ================= CÁLCULO DE MÉTRICAS & GANANCIA REAL =================
   const metrics = useMemo(() => {
-    const totalOrders = orders.length;
+    const totalShopifyOrders = orders.length; // Total clientes que llegaron de Shopify
     const confirmedOrders = orders.filter((o) => ['confirmado', 'en_ruta', 'entregado'].includes(o.status));
     const deliveredOrders = orders.filter((o) => o.status === 'entregado');
     const canceledOrders = orders.filter((o) => o.status === 'cancelado');
     const pendingOrders = orders.filter((o) => o.status === 'pendiente');
 
     const confirmedRevenue = confirmedOrders.reduce((acc, o) => acc + (parseFloat(o.total_amount) || 0), 0);
-    const deliveredRevenue = deliveredOrders.reduce((acc, o) => acc + (parseFloat(o.total_amount) || 0), 0);
 
     const spend = parseFloat(adSpend) || 0;
     const fLima = parseFloat(fleteLima) || 0;
     const fProv = parseFloat(fleteProv) || 0;
 
-    // Costo de mercadería de confirmados basado en la tabla de productos
+    // Costo de mercadería de productos confirmados
     const totalCOGS = confirmedOrders.reduce((acc, o) => {
       if (o.items && Array.isArray(o.items) && o.items.length > 0) {
-        const orderCogs = o.items.reduce((subAcc, item) => {
-          const match = products.find((p) => p.name.toLowerCase() === (item.title || '').toLowerCase());
-          const unitCost = match ? parseFloat(match.cost_price || 0) : 25; // S/ 25 fallback
-          return subAcc + unitCost * (item.quantity || 1);
-        }, 0);
-        return acc + orderCogs;
+        return (
+          acc +
+          o.items.reduce((subAcc, it) => {
+            const itTitle = (it.title || '').toLowerCase().trim();
+            const match = products.find((p) => {
+              const pName = (p.name || '').toLowerCase().trim();
+              return pName === itTitle || itTitle.includes(pName) || pName.includes(itTitle);
+            });
+            const unitCost = match ? parseFloat(match.cost_price || 0) : 25;
+            return subAcc + unitCost * (parseInt(it.quantity) || 1);
+          }, 0)
+        );
       }
       return acc + 25;
     }, 0);
 
     // Costo total de flete
-    const totalShipping = confirmedOrders.reduce(
-      (acc, o) => acc + (o.zone === 'lima' ? fLima : fProv),
-      0
-    );
+    const totalShipping = confirmedOrders.reduce((acc, o) => {
+      return acc + (o.zone === 'lima' ? fLima : fProv);
+    }, 0);
 
-    // Ganancia Líquida
-    const netProfit = confirmedRevenue - spend - totalCOGS - totalShipping;
-    const profitMargin = confirmedRevenue > 0 ? ((netProfit / confirmedRevenue) * 100).toFixed(1) : 0;
+    // Inversión Total del Negocio (Ads + COGS + Envíos)
+    const totalInvestment = spend + totalCOGS + totalShipping;
 
-    // Ratios
-    const confirmationRate = totalOrders > 0 ? ((confirmedOrders.length / totalOrders) * 100).toFixed(1) : 0;
-    const rawCPA = totalOrders > 0 && spend > 0 ? (spend / totalOrders).toFixed(2) : '0.00';
-    const realCPA = confirmedOrders.length > 0 && spend > 0 ? (spend / confirmedOrders.length).toFixed(2) : '0.00';
+    // GANANCIA REAL LÍQUIDA EN EL BOLSILLO
+    const netProfit = confirmedRevenue - totalInvestment;
+
+    // % de Margen Neto Real
+    const marginPct = confirmedRevenue > 0 ? ((netProfit / confirmedRevenue) * 100).toFixed(1) : 0;
+
+    // ROI (%) Real
+    const roi = totalInvestment > 0 ? ((netProfit / totalInvestment) * 100).toFixed(1) : 0;
+
+    // Ratios Publicitarios y Operativos
+    const closingRate = totalShopifyOrders > 0 ? ((confirmedOrders.length / totalShopifyOrders) * 100).toFixed(1) : 0;
+    const cpaAds = totalShopifyOrders > 0 && spend > 0 ? (spend / totalShopifyOrders).toFixed(2) : '0.00';
+    const cpaReal = confirmedOrders.length > 0 && spend > 0 ? (spend / confirmedOrders.length).toFixed(2) : '0.00';
     const roas = spend > 0 ? (confirmedRevenue / spend).toFixed(2) : '0.00';
     const aov = confirmedOrders.length > 0 ? confirmedRevenue / confirmedOrders.length : 0;
 
-    // CPA Break-even
-    const avgCogs = confirmedOrders.length > 0 ? totalCOGS / confirmedOrders.length : 25;
-    const avgShipping = confirmedOrders.length > 0 ? totalShipping / confirmedOrders.length : 13.5;
-    const cpaBreakEven = Math.max(0, aov - avgCogs - avgShipping).toFixed(2);
+    // Desglose de unidades vendidas por producto
+    const soldByProduct = {};
+    confirmedOrders.forEach((o) => {
+      if (o.items && Array.isArray(o.items)) {
+        o.items.forEach((it) => {
+          const title = it.title || 'Producto General';
+          soldByProduct[title] = (soldByProduct[title] || 0) + (parseInt(it.quantity) || 1);
+        });
+      }
+    });
 
     return {
-      totalOrders,
+      totalShopifyOrders,
       confirmedCount: confirmedOrders.length,
       deliveredCount: deliveredOrders.length,
       canceledCount: canceledOrders.length,
       pendingCount: pendingOrders.length,
-      confirmationRate,
+      closingRate,
       confirmedRevenue,
-      deliveredRevenue,
       spend,
       totalCOGS,
       totalShipping,
+      totalInvestment,
       netProfit,
-      profitMargin,
-      rawCPA,
-      realCPA,
+      marginPct,
+      roi,
+      cpaAds,
+      cpaReal,
       roas,
       aov,
-      cpaBreakEven,
+      soldByProduct,
     };
   }, [orders, products, adSpend, fleteLima, fleteProv]);
 
-  // Filtro de lista
+  // Filtro de órdenes
   const filteredOrders = orders.filter((o) => {
     const term = search.toLowerCase();
     const matchSearch =
@@ -237,13 +286,13 @@ export default function CodDashboard() {
     <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
 
-        {/* NAVEGACIÓN SUPERIOR */}
+        {/* BARRA SUPERIOR & NAVEGACIÓN */}
         <header className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
           <div>
             <h1 className="text-xl font-black text-white flex items-center gap-2">
-              COD MANAGER <span className="text-emerald-400 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">SISTEMA COMPACTO</span>
+              COD MANAGER <span className="text-emerald-400 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20">PRO OPERATIVO</span>
             </h1>
-            <p className="text-xs text-zinc-400 mt-0.5">Control de despachos, inventario físico y rentabilidad neta</p>
+            <p className="text-xs text-zinc-400 mt-0.5">Control de despachos contraentrega, stock vivo y rentabilidad neta</p>
           </div>
 
           <div className="flex bg-zinc-900/90 p-1 rounded-xl border border-zinc-800">
@@ -275,20 +324,20 @@ export default function CodDashboard() {
         </header>
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 1: BANDEJA DE VENTAS EN LÍNEA (TABLA COMPACTA)                    */}
+        {/* SECCIÓN 1: BANDEJA DE VENTAS EN LÍNEA                                     */}
         {/* ========================================================================= */}
         {activeTab === 'ventas' && (
           <section className="space-y-4">
-            {/* BARRA DE FILTROS RÁPIDOS POR ESTADO */}
+            {/* FILTROS POR ESTADO */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-[#11141a] p-3 rounded-xl border border-zinc-800">
               <div className="flex flex-wrap gap-1.5">
                 {[
                   { id: 'todos', label: 'Todos', count: orders.length, color: 'hover:bg-zinc-800' },
-                  { id: 'pendiente', label: 'Pendientes', count: metrics.pendingCount, color: 'hover:bg-amber-950/40 text-amber-400' },
-                  { id: 'confirmado', label: 'Confirmados', count: metrics.confirmedCount, color: 'hover:bg-blue-950/40 text-blue-400' },
-                  { id: 'en_ruta', label: 'En Ruta', count: orders.filter((o) => o.status === 'en_ruta').length, color: 'hover:bg-purple-950/40 text-purple-400' },
-                  { id: 'entregado', label: 'Entregados', count: metrics.deliveredCount, color: 'hover:bg-emerald-950/40 text-emerald-400' },
-                  { id: 'cancelado', label: 'Cancelados', count: metrics.canceledCount, color: 'hover:bg-rose-950/40 text-rose-400' },
+                  { id: 'pendiente', label: 'Pendientes', count: metrics.pendingCount, color: 'text-amber-400' },
+                  { id: 'confirmado', label: 'Confirmados', count: metrics.confirmedCount, color: 'text-blue-400' },
+                  { id: 'en_ruta', label: 'En Ruta', count: orders.filter((o) => o.status === 'en_ruta').length, color: 'text-purple-400' },
+                  { id: 'entregado', label: 'Entregados', count: metrics.deliveredCount, color: 'text-emerald-400' },
+                  { id: 'cancelado', label: 'Cancelados', count: metrics.canceledCount, color: 'text-rose-400' },
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -304,7 +353,6 @@ export default function CodDashboard() {
                 ))}
               </div>
 
-              {/* Filtro por Zona */}
               <div className="flex items-center gap-1 bg-zinc-900 p-1 rounded-lg border border-zinc-800 text-xs">
                 {['todos', 'lima', 'provincia'].map((z) => (
                   <button
@@ -320,18 +368,16 @@ export default function CodDashboard() {
               </div>
             </div>
 
-            {/* BARRA DE BÚSQUEDA */}
-            <div className="flex items-center gap-3">
-              <input
-                type="text"
-                placeholder="Buscar por cliente, teléfono, #orden o distrito..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full bg-[#11141a] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
-              />
-            </div>
+            {/* BUSCADOR */}
+            <input
+              type="text"
+              placeholder="Buscar por cliente, teléfono, #orden o distrito..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full bg-[#11141a] border border-zinc-800 rounded-xl px-4 py-2.5 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
+            />
 
-            {/* TABLA COMPACTA EN FILAS */}
+            {/* TABLA EN LÍNEA */}
             <div className="bg-[#11141a] border border-zinc-800 rounded-2xl overflow-x-auto shadow-2xl">
               <table className="w-full text-left text-xs border-collapse">
                 <thead>
@@ -342,12 +388,12 @@ export default function CodDashboard() {
                     <th className="py-3.5 px-4">Productos</th>
                     <th className="py-3.5 px-4 text-right">Total</th>
                     <th className="py-3.5 px-4 text-right">Adelanto</th>
-                    <th className="py-3.5 px-4 text-right">Saldo a Cobrar</th>
+                    <th className="py-3.5 px-4 text-right">Saldo</th>
                     <th className="py-3.5 px-4">Estado</th>
                     <th className="py-3.5 px-4 text-center">Acciones</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-800/60 font-sans">
+                <tbody className="divide-y divide-zinc-800/60">
                   {loading ? (
                     <tr>
                       <td colSpan="9" className="py-8 text-center text-zinc-500">Cargando despachos...</td>
@@ -363,10 +409,9 @@ export default function CodDashboard() {
                       const balance = total - advance;
                       const cleanPhone = (order.phone || '').replace(/\D/g, '');
 
-                      // Mensajes WhatsApp según estado/zona
                       let waMessage = '';
                       if (order.status === 'cancelado') {
-                        waMessage = `Hola ${order.customer_name}, te saludamos de la tienda respecto a tu pedido ${order.order_number}. Vimos que no pudiste concretarlo. ¿Tuviste algún inconveniente con la entrega o deseas reprogramarlo con una facilidad de pago? Quedamos atentos para ayudarte.`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos de la tienda respecto a tu pedido ${order.order_number}. Vimos que no pudiste concretarlo. ¿Tuviste algún inconveniente o deseas reprogramarlo con una facilidad de entrega? Quedamos atentos para ayudarte.`;
                       } else if (order.zone === 'lima') {
                         waMessage = `Hola ${order.customer_name}, te saludamos para coordinar la entrega de tu pedido ${order.order_number} por S/ ${balance.toFixed(2)}. El despacho es a tu domicilio (${order.address}, ${order.city}) con motorizado contraentrega. ¿Me confirmas si estás disponible hoy?`;
                       } else {
@@ -442,33 +487,28 @@ export default function CodDashboard() {
                           </td>
                           <td className="py-3 px-4">
                             <div className="flex items-center justify-center gap-1.5">
-                              {/* Botón WhatsApp */}
                               <a
                                 href={waUrl}
                                 target="_blank"
                                 rel="noreferrer"
                                 title="Contactar por WhatsApp"
-                                className={`px-2.5 py-1 rounded text-[11px] font-bold text-white flex items-center transition ${
+                                className={`px-2.5 py-1 rounded text-[11px] font-bold text-white transition ${
                                   order.status === 'cancelado' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-emerald-600 hover:bg-emerald-500'
                                 }`}
                               >
                                 WA
                               </a>
-
-                              {/* Editar */}
                               <button
                                 onClick={() => setEditingOrder(order)}
                                 title="Editar pedido"
-                                className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 p-1 rounded transition text-xs"
+                                className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 p-1 rounded text-xs"
                               >
                                 ✏️
                               </button>
-
-                              {/* Eliminar */}
                               <button
-                                onClick={() => deleteOrder(order.id, order.order_number)}
+                                onClick={() => deleteOrder(order.id, order.order_number, order.status, order.items)}
                                 title="Eliminar orden"
-                                className="bg-rose-950/40 hover:bg-rose-900 text-rose-400 p-1 rounded transition text-xs border border-rose-900/40"
+                                className="bg-rose-950/40 hover:bg-rose-900 text-rose-400 p-1 rounded text-xs border border-rose-900/40"
                               >
                                 🗑️
                               </button>
@@ -489,22 +529,20 @@ export default function CodDashboard() {
         {/* ========================================================================= */}
         {activeTab === 'logistica' && (
           <section className="space-y-6">
-            {/* INVENTARIO DE PRODUCTOS */}
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-zinc-800 pb-3">
                 <div>
-                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">Inventario Físico y Costos (COGS)</h3>
-                  <p className="text-xs text-zinc-400">El stock se descuenta automáticamente al marcar un pedido como Confirmado.</p>
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">Inventario Físico & Costo de Compra</h3>
+                  <p className="text-xs text-zinc-400">El stock se resta al Confirmar y <strong>se devuelve automáticamente si se Cancela</strong>.</p>
                 </div>
 
-                {/* Formulario rápido para añadir producto */}
                 <form onSubmit={addProduct} className="flex flex-wrap gap-2">
                   <input
                     type="text"
                     placeholder="Nombre del Producto"
                     value={newProdName}
                     onChange={(e) => setNewProdName(e.target.value)}
-                    className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-white"
+                    className="bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1 text-xs text-white"
                   />
                   <input
                     type="number"
@@ -526,7 +564,6 @@ export default function CodDashboard() {
                 </form>
               </div>
 
-              {/* Lista de productos */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {products.length === 0 ? (
                   <p className="text-xs text-zinc-500">No hay productos registrados en la base de datos.</p>
@@ -546,7 +583,7 @@ export default function CodDashboard() {
                         </div>
                       </div>
                       <div className="text-right">
-                        <span className="text-[10px] text-zinc-500 uppercase block font-bold">Stock Disp.</span>
+                        <span className="text-[10px] text-zinc-500 uppercase block font-bold">Stock Físico</span>
                         <input
                           type="number"
                           defaultValue={prod.stock}
@@ -562,7 +599,7 @@ export default function CodDashboard() {
               </div>
             </div>
 
-            {/* TABLA DE ROTULADO Y CLAVE SHALOM */}
+            {/* TABLA DE DESPACHOS Y GUÍAS SHALOM */}
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-4">
               <h3 className="text-sm font-bold text-white uppercase tracking-wider">Despachos Confirmados & Clave Shalom</h3>
               <div className="divide-y divide-zinc-800">
@@ -632,16 +669,16 @@ export default function CodDashboard() {
         )}
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 3: MÉTRICAS REALES (UNIT ECONOMICS COMPLETOS)                     */}
+        {/* SECCIÓN 3: MÉTRICAS REALES Y FINANZAS COMPLETAS                           */}
         {/* ========================================================================= */}
         {activeTab === 'metricas' && (
           <section className="space-y-6">
-            {/* CONFIGURACIÓN DE GASTOS */}
+            {/* INPUTS DE COSTOS */}
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-3">
-              <h3 className="text-xs font-bold uppercase text-zinc-400 tracking-wider">Parámetros de Costo del Día</h3>
+              <h3 className="text-xs font-bold uppercase text-zinc-400 tracking-wider">Parámetros Financieros</h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800">
-                  <label className="block text-[10px] uppercase font-bold text-zinc-400">Gasto en Anuncios (Ads)</label>
+                  <label className="block text-[10px] uppercase font-bold text-zinc-400">Gasto de Publicidad (Ads)</label>
                   <div className="flex items-center text-sm font-bold text-white mt-1">
                     <span className="text-zinc-500 mr-1">S/</span>
                     <input
@@ -649,7 +686,7 @@ export default function CodDashboard() {
                       placeholder="0.00"
                       value={adSpend}
                       onChange={(e) => saveConfig('cod_spend', e.target.value, setAdSpend)}
-                      className="bg-transparent w-full focus:outline-none font-mono"
+                      className="bg-transparent w-full focus:outline-none font-mono text-emerald-400"
                     />
                   </div>
                 </div>
@@ -682,62 +719,138 @@ export default function CodDashboard() {
               </div>
             </div>
 
-            {/* TARJETAS PRINCIPALES */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="bg-[#11141a] border border-emerald-500/40 p-5 rounded-2xl">
-                <span className="text-[10px] font-bold uppercase text-emerald-400 block">Utilidad Neta Real</span>
+            {/* GRILLA DE LAS MÉTRICAS SOLICITADAS */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              
+              {/* 1. PEDIDOS SHOPIFY (LLEGADOS) */}
+              <div className="bg-[#11141a] border border-zinc-800 p-4 rounded-2xl">
+                <span className="text-[10px] font-bold uppercase text-zinc-400 block">Pedidos Shopify (Entrantes)</span>
+                <span className="text-3xl font-black text-white font-mono block mt-1">
+                  {metrics.totalShopifyOrders}
+                </span>
+                <p className="text-[11px] text-zinc-500 mt-1">Clientes que enviaron formulario</p>
+              </div>
+
+              {/* 2. CONFIRMADOS & % CIERRE */}
+              <div className="bg-[#11141a] border border-blue-500/40 p-4 rounded-2xl">
+                <span className="text-[10px] font-bold uppercase text-blue-400 block">Confirmados & % Cierre</span>
+                <div className="flex items-baseline gap-2 mt-1">
+                  <span className="text-3xl font-black text-blue-300 font-mono">{metrics.confirmedCount}</span>
+                  <span className="text-sm font-bold text-zinc-400 font-mono">({metrics.closingRate}%)</span>
+                </div>
+                <p className="text-[11px] text-zinc-500 mt-1">Tasa de confirmación efectiva</p>
+              </div>
+
+              {/* 3. CPA ADS (BRUTO) */}
+              <div className="bg-[#11141a] border border-zinc-800 p-4 rounded-2xl">
+                <span className="text-[10px] font-bold uppercase text-zinc-400 block">CPA Ads (Bruto Shopify)</span>
+                <span className="text-3xl font-black text-zinc-200 font-mono block mt-1">
+                  S/ {metrics.cpaAds}
+                </span>
+                <p className="text-[11px] text-zinc-500 mt-1">Gasto Ads / Total Pedidos</p>
+              </div>
+
+              {/* 4. CPA REAL (EFECTIVO) */}
+              <div className="bg-[#11141a] border border-amber-500/50 p-4 rounded-2xl">
+                <span className="text-[10px] font-bold uppercase text-amber-400 block">CPA Real (Efectivo)</span>
+                <span className="text-3xl font-black text-amber-300 font-mono block mt-1">
+                  S/ {metrics.cpaReal}
+                </span>
+                <p className="text-[11px] text-amber-400/80 mt-1">Gasto Ads / Confirmados</p>
+              </div>
+
+              {/* 5. GANANCIA REAL LÍQUIDA */}
+              <div className="bg-gradient-to-br from-emerald-950/60 via-[#11141a] to-[#11141a] border-2 border-emerald-500/50 p-4 rounded-2xl">
+                <span className="text-[10px] font-black uppercase text-emerald-400 block">Ganancia Real Líquida</span>
                 <span className="text-3xl font-black text-emerald-300 font-mono block mt-1">
                   S/ {metrics.netProfit.toFixed(2)}
                 </span>
-                <p className="text-xs text-emerald-400/80 mt-1">Margen Neto: {metrics.profitMargin}%</p>
+                <p className="text-[11px] text-emerald-400 mt-1">Limpio en bolsillo tras todo gasto</p>
               </div>
 
-              <div className="bg-[#11141a] border border-amber-500/40 p-5 rounded-2xl">
-                <span className="text-[10px] font-bold uppercase text-amber-400 block">CPA Break-even Máximo</span>
-                <span className="text-3xl font-black text-amber-300 font-mono block mt-1">
-                  S/ {metrics.cpaBreakEven}
+              {/* 6. % DE MARGEN NETO */}
+              <div className="bg-[#11141a] border border-emerald-500/30 p-4 rounded-2xl">
+                <span className="text-[10px] font-bold uppercase text-emerald-400 block">% Margen Neto</span>
+                <span className="text-3xl font-black text-emerald-300 font-mono block mt-1">
+                  {metrics.marginPct}%
                 </span>
-                <p className="text-[11px] text-zinc-500 mt-1">CPA máximo antes de perder dinero</p>
+                <p className="text-[11px] text-zinc-500 mt-1">Utilidad / Facturación</p>
               </div>
 
-              <div className="bg-[#11141a] border border-zinc-800 p-5 rounded-2xl">
-                <span className="text-[10px] font-bold uppercase text-zinc-400 block">CPA Real (Efectivo)</span>
-                <span className="text-3xl font-black text-zinc-200 font-mono block mt-1">
-                  S/ {metrics.realCPA}
-                </span>
-                <p className="text-[11px] text-zinc-500 mt-1">CPA Bruto: S/ {metrics.rawCPA}</p>
-              </div>
-
-              <div className="bg-[#11141a] border border-zinc-800 p-5 rounded-2xl">
+              {/* 7. ROAS REAL */}
+              <div className="bg-[#11141a] border border-zinc-800 p-4 rounded-2xl">
                 <span className="text-[10px] font-bold uppercase text-blue-400 block">ROAS Real</span>
                 <span className="text-3xl font-black text-blue-300 font-mono block mt-1">
                   {metrics.roas}x
                 </span>
-                <p className="text-[11px] text-zinc-500 mt-1">Confirmación: {metrics.confirmationRate}%</p>
+                <p className="text-[11px] text-zinc-500 mt-1">Facturación / Gasto Ads</p>
+              </div>
+
+              {/* 8. ROI (%) */}
+              <div className="bg-[#11141a] border border-purple-500/40 p-4 rounded-2xl">
+                <span className="text-[10px] font-bold uppercase text-purple-400 block">ROI (%) Inversión Total</span>
+                <span className="text-3xl font-black text-purple-300 font-mono block mt-1">
+                  {metrics.roi}%
+                </span>
+                <p className="text-[11px] text-zinc-500 mt-1">Retorno sobre Ads + Stock + Fletes</p>
+              </div>
+
+            </div>
+
+            {/* TABLA DE STOCK VENDIDO POR PRODUCTO */}
+            <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-4">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                Resumen de Stock Vendido de Cada Producto
+              </h3>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                {Object.keys(metrics.soldByProduct).length === 0 ? (
+                  <p className="text-xs text-zinc-500">Aún no hay unidades vendidas en pedidos confirmados.</p>
+                ) : (
+                  Object.entries(metrics.soldByProduct).map(([prodName, qty]) => {
+                    const matched = products.find((p) => (p.name || '').toLowerCase().trim() === prodName.toLowerCase().trim());
+                    const currentStock = matched ? matched.stock : 'N/A';
+
+                    return (
+                      <div key={prodName} className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 flex justify-between items-center">
+                        <div>
+                          <h4 className="font-bold text-white text-xs">{prodName}</h4>
+                          <span className="text-[11px] text-zinc-400 mt-0.5 block">
+                            Stock en Almacén: <strong className="text-white font-mono">{currentStock}</strong>
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-[10px] font-bold uppercase text-emerald-400 block">Vendido</span>
+                          <span className="text-xl font-black text-emerald-300 font-mono">{qty} und</span>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
 
             {/* ESTADO DE RESULTADOS DETALLADO */}
             <div className="bg-[#11141a] p-6 rounded-2xl border border-zinc-800 space-y-2 font-mono text-sm">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400 font-sans mb-3">Flujo de Caja Real</h4>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400 font-sans mb-3">Flujo de Caja Real (Desglose)</h4>
               <div className="flex justify-between text-emerald-400">
                 <span>(+) Facturación Confirmada</span>
                 <span>S/ {metrics.confirmedRevenue.toFixed(2)}</span>
               </div>
               <div className="flex justify-between text-rose-400">
-                <span>(-) Gasto en Ads</span>
+                <span>(-) Gasto de Publicidad (Ads)</span>
                 <span>- S/ {metrics.spend.toFixed(2)}</span>
               </div>
               <div className="flex justify-between text-rose-400">
-                <span>(-) Costo de Mercadería (COGS)</span>
+                <span>(-) Costo de Mercadería Vendida (COGS)</span>
                 <span>- S/ {metrics.totalCOGS.toFixed(2)}</span>
               </div>
               <div className="flex justify-between text-rose-400">
-                <span>(-) Fletes de Envíos</span>
+                <span>(-) Costo de Envíos (Fletes)</span>
                 <span>- S/ {metrics.totalShipping.toFixed(2)}</span>
               </div>
-              <div className="border-t border-zinc-800 pt-2 flex justify-between text-base font-black text-white font-sans">
-                <span>(=) Utilidad Neta Líquida</span>
+              <div className="border-t border-zinc-800 pt-3 flex justify-between text-base font-black text-white font-sans">
+                <span>(=) Ganancia Real Líquida</span>
                 <span className={metrics.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
                   S/ {metrics.netProfit.toFixed(2)}
                 </span>
@@ -746,7 +859,7 @@ export default function CodDashboard() {
           </section>
         )}
 
-        {/* ================= MODAL PARA EDITAR PEDIDO ================= */}
+        {/* MODAL DE EDICIÓN */}
         {editingOrder && (
           <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
             <form onSubmit={saveEditedOrder} className="bg-[#11141a] border border-zinc-800 rounded-2xl p-6 max-w-lg w-full space-y-4">
