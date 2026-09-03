@@ -3,33 +3,73 @@ import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 
 export default function CodDashboard() {
-  const [activeTab, setActiveTab] = useState('ventas'); // 'ventas' | 'logistica' | 'metricas'
+  // ================= ESTADO DE AUTENTICACIÓN =================
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [isSubmittingAuth, setIsSubmittingAuth] = useState(false);
+
+  // Escuchar sesión en vivo
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      setAuthLoading(false);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    setIsSubmittingAuth(true);
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: loginEmail,
+      password: loginPassword,
+    });
+
+    if (error) {
+      setLoginError('Credenciales incorrectas o usuario no registrado en Supabase.');
+    }
+    setIsSubmittingAuth(false);
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+
+  // ================= ESTADOS DEL DASHBOARD =================
+  const [activeTab, setActiveTab] = useState('ventas');
   const [orders, setOrders] = useState([]);
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // Selección masiva
   const [selectedOrders, setSelectedOrders] = useState([]);
 
-  // Filtros de fecha
-  const [datePreset, setDatePreset] = useState('hoy'); // 'hoy' | 'ayer' | '7dias' | 'mes' | 'todos' | 'personalizado'
+  const [datePreset, setDatePreset] = useState('hoy');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
 
-  // Filtros de tabla
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('todos');
   const [zoneFilter, setZoneFilter] = useState('todos');
 
-  // Modal de edición
   const [editingOrder, setEditingOrder] = useState(null);
 
-  // Formulario nuevo producto
   const [newProdName, setNewProdName] = useState('');
   const [newProdStock, setNewProdStock] = useState('');
   const [newProdCost, setNewProdCost] = useState('');
 
-  // Parámetros financieros en memoria local
   const [adSpend, setAdSpend] = useState('');
   const [fleteLima, setFleteLima] = useState('12');
   const [fleteProv, setFleteProv] = useState('15');
@@ -51,8 +91,8 @@ export default function CodDashboard() {
     localStorage.setItem(key, val);
   };
 
-  // Traer datos de Supabase
   const fetchData = async () => {
+    if (!session) return;
     setLoading(true);
     const [ordersRes, productsRes] = await Promise.all([
       supabase.from('orders').select('*').order('created_at', { ascending: false }),
@@ -65,16 +105,18 @@ export default function CodDashboard() {
   };
 
   useEffect(() => {
-    fetchData();
+    if (session) {
+      fetchData();
 
-    const channel = supabase
-      .channel('realtime_dashboard_final')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
-      .subscribe();
+      const channel = supabase
+        .channel('realtime_dashboard_auth')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
+        .subscribe();
 
-    return () => supabase.removeChannel(channel);
-  }, []);
+      return () => supabase.removeChannel(channel);
+    }
+  }, [session]);
 
   // ================= FILTRADO POR FECHA =================
   const dateFilteredOrders = useMemo(() => {
@@ -87,9 +129,7 @@ export default function CodDashboard() {
     return orders.filter((order) => {
       const orderDate = new Date(order.created_at || Date.now());
 
-      if (datePreset === 'hoy') {
-        return orderDate >= startOfToday && orderDate <= endOfToday;
-      }
+      if (datePreset === 'hoy') return orderDate >= startOfToday && orderDate <= endOfToday;
       if (datePreset === 'ayer') {
         const startOfYesterday = new Date(startOfToday);
         startOfYesterday.setDate(startOfYesterday.getDate() - 1);
@@ -122,7 +162,7 @@ export default function CodDashboard() {
     });
   }, [orders, datePreset, customStart, customEnd]);
 
-  // ================= AJUSTE DINÁMICO DE STOCK =================
+  // ================= AJUSTE DE STOCK =================
   const adjustStock = async (items, multiplier) => {
     if (!items || !Array.isArray(items)) return;
 
@@ -142,27 +182,20 @@ export default function CodDashboard() {
     }
   };
 
-  // Actualizar estado de pedido
   const updateOrderStatus = async (order, newStatus) => {
     const isOldConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
     const isNewConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(newStatus);
 
-    if (!isOldConfirmed && isNewConfirmed) {
-      await adjustStock(order.items, -1);
-    } else if (isOldConfirmed && !isNewConfirmed) {
-      await adjustStock(order.items, 1);
-    }
+    if (!isOldConfirmed && isNewConfirmed) await adjustStock(order.items, -1);
+    else if (isOldConfirmed && !isNewConfirmed) await adjustStock(order.items, 1);
 
     const payload = { status: newStatus };
-    if (newStatus === 'entregado') {
-      payload.advance_payment = parseFloat(order.total_amount) || 0;
-    }
+    if (newStatus === 'entregado') payload.advance_payment = parseFloat(order.total_amount) || 0;
 
     await supabase.from('orders').update(payload).eq('id', order.id);
     fetchData();
   };
 
-  // 🔥 REGISTRAR ADELANTO Y AUTO-CONFIRMAR
   const handleAdvanceChange = async (order, newAdvanceVal) => {
     const advance = parseFloat(newAdvanceVal) || 0;
     const wasConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
@@ -175,9 +208,7 @@ export default function CodDashboard() {
       shouldDeductStock = true;
     }
 
-    if (shouldDeductStock && !wasConfirmed) {
-      await adjustStock(order.items, -1);
-    }
+    if (shouldDeductStock && !wasConfirmed) await adjustStock(order.items, -1);
 
     await supabase.from('orders').update({
       advance_payment: advance,
@@ -187,26 +218,19 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // ================= ACCIONES MASIVAS =================
   const handleBulkStatusChange = async (newStatus) => {
     if (!newStatus || selectedOrders.length === 0) return;
-
     const targets = orders.filter((o) => selectedOrders.includes(o.id));
 
     for (const order of targets) {
       const isOldConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
       const isNewConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(newStatus);
 
-      if (!isOldConfirmed && isNewConfirmed) {
-        await adjustStock(order.items, -1);
-      } else if (isOldConfirmed && !isNewConfirmed) {
-        await adjustStock(order.items, 1);
-      }
+      if (!isOldConfirmed && isNewConfirmed) await adjustStock(order.items, -1);
+      else if (isOldConfirmed && !isNewConfirmed) await adjustStock(order.items, 1);
 
       const payload = { status: newStatus };
-      if (newStatus === 'entregado') {
-        payload.advance_payment = parseFloat(order.total_amount) || 0;
-      }
+      if (newStatus === 'entregado') payload.advance_payment = parseFloat(order.total_amount) || 0;
 
       await supabase.from('orders').update(payload).eq('id', order.id);
     }
@@ -232,11 +256,9 @@ export default function CodDashboard() {
 
   const deleteOrder = async (id, orderNumber, orderStatus, orderItems) => {
     if (!confirm(`¿Eliminar definitivamente el pedido ${orderNumber}?`)) return;
-
     if (['confirmado', 'en_ruta', 'entregado'].includes(orderStatus)) {
       await adjustStock(orderItems, 1);
     }
-
     await supabase.from('orders').delete().eq('id', id);
     setSelectedOrders((prev) => prev.filter((item) => item !== id));
     fetchData();
@@ -253,9 +275,7 @@ export default function CodDashboard() {
     const advance = parseFloat(editingOrder.advance_payment) || 0;
     let targetStatus = editingOrder.status;
 
-    if (advance > 0 && targetStatus === 'pendiente') {
-      targetStatus = 'confirmado';
-    }
+    if (advance > 0 && targetStatus === 'pendiente') targetStatus = 'confirmado';
 
     if (original && original.status !== targetStatus) {
       const isOldConf = ['confirmado', 'en_ruta', 'entregado'].includes(original.status);
@@ -283,7 +303,7 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // ================= GESTIÓN DE PRODUCTOS =================
+  // ================= INVENTARIO =================
   const addProduct = async (e) => {
     e.preventDefault();
     if (!newProdName) return;
@@ -310,7 +330,7 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // ================= CÁLCULO DE MÉTRICAS & FLUJO =================
+  // ================= MÉTRICAS UNIT ECONOMICS =================
   const metrics = useMemo(() => {
     const totalShopifyOrders = dateFilteredOrders.length;
     const confirmedOrders = dateFilteredOrders.filter((o) => ['confirmado', 'en_ruta', 'entregado'].includes(o.status));
@@ -432,7 +452,7 @@ export default function CodDashboard() {
     };
   }, [dateFilteredOrders, products, adSpend, fleteLima, fleteProv]);
 
-  // ================= FILTRADO DE LA TABLA =================
+  // ================= FILTRADO TABLA =================
   const visibleOrders = dateFilteredOrders.filter((o) => {
     const term = search.toLowerCase();
     const matchSearch =
@@ -453,7 +473,6 @@ export default function CodDashboard() {
     return matchSearch && matchStatus && matchZone;
   });
 
-  // ================= ESTADÍSTICAS EN VIVO DE LO SELECCIONADO =================
   const selectedStats = useMemo(() => {
     const targets = orders.filter((o) => selectedOrders.includes(o.id));
     const count = targets.length;
@@ -469,7 +488,6 @@ export default function CodDashboard() {
     return { count, totalAmount, totalAdvance, totalBalance };
   }, [orders, selectedOrders]);
 
-  // Botón: Seleccionar todos con adelanto
   const handleSelectWithAdvance = () => {
     const idsWithAdvance = visibleOrders
       .filter((o) => (parseFloat(o.advance_payment) || 0) > 0)
@@ -500,11 +518,152 @@ export default function CodDashboard() {
     );
   };
 
+  // ================= 1. CARGA INICIAL (SPINNER) =================
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#090b0e] flex flex-col items-center justify-center text-zinc-400 font-sans">
+        <div className="w-10 h-10 border-2 border-emerald-500/20 border-t-emerald-500 rounded-full animate-spin"></div>
+        <p className="mt-4 text-xs font-mono tracking-wider uppercase text-zinc-500">Cargando sistema seguro...</p>
+      </div>
+    );
+  }
+
+  // ================= 2. PANTALLA DE LOGIN CON LOGOS =================
+  if (!session) {
+    return (
+      <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased flex items-center justify-center p-4 relative overflow-hidden">
+        {/* Glow de fondo */}
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[550px] h-[550px] bg-emerald-500/10 rounded-full blur-[140px] pointer-events-none"></div>
+        <div className="absolute bottom-10 right-10 w-[350px] h-[350px] bg-blue-500/5 rounded-full blur-[120px] pointer-events-none"></div>
+
+        <div className="max-w-md w-full relative z-10 space-y-6">
+          
+          {/* TARJETA PRINCIPAL DE ACCESO */}
+          <div className="bg-[#11141a]/95 backdrop-blur-xl border border-zinc-800 rounded-3xl p-7 md:p-8 shadow-2xl space-y-6">
+            
+            {/* ENCABEZADO */}
+            <div className="text-center space-y-2">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-[11px] font-bold text-zinc-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                PERÚ COD • DASHBOARD PRIVADO
+              </div>
+              <h1 className="text-2xl font-black tracking-tight text-white mt-1">
+                Centro de Mando
+              </h1>
+              <p className="text-xs text-zinc-400">
+                Ingresa con tu correo autorizado para gestionar ventas, despachos y caja.
+              </p>
+            </div>
+
+            {/* BADGES / LOGOS DEL ECOSISTEMA (SHOPIFY • SHALOM • OLVA) */}
+            <div className="bg-zinc-950/80 border border-zinc-850 p-3 rounded-2xl flex items-center justify-around gap-2">
+              
+              {/* SHOPIFY */}
+              <div className="flex items-center gap-1.5 opacity-90 hover:opacity-100 transition">
+                <svg className="w-5 h-5 text-[#95BF47]" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M19.34 7.21c-.06-.18-.23-.3-.42-.31-.19-.01-5.18-.32-5.18-.32s-1.38-4.22-1.47-4.49c-.09-.27-.3-.49-.62-.49h-.29c-.06 0-.13.01-.19.03-.04.01-3.69 1.15-3.69 1.15s-2.31-.77-2.48-.77c-.32 0-.6.2-.68.5-.09.34-1.33 5.37-1.33 5.37s-2.07.63-2.26.69c-.3.09-.5.36-.49.68.12 2.82 2.22 13.06 2.22 13.06.2 1 .99 1.69 2.01 1.69h8.92c1.02 0 1.81-.69 2.01-1.69l3.52-14.73c.05-.22 0-.46-.15-.62zm-6.27-.61l-1.07-3.28 2.88.18-1.81 3.1zm-3.05-.95l.93-2.83 1.13 3.44-2.06-.61zm-1.83 1.93l1.19.36-1.57 3.32-.47-3.03.85-.65zm-2.09.64l.97.3-1.67 11.83-.87-5.59 1.57-6.54zm3.01 12.79l2.25-10.42 1.48.45-2.26 10.42-1.47-.45zm5.72-9.97l-2.25 10.42-1.48-.45 2.26-10.42 1.47.45zm1.88 9.53l-1.67-11.83.97-.3 1.57 6.54-.87 5.59z" />
+                </svg>
+                <span className="text-[11px] font-black tracking-wide text-zinc-300">Shopify</span>
+              </div>
+
+              <div className="h-4 w-px bg-zinc-800"></div>
+
+              {/* SHALOM */}
+              <div className="flex items-center gap-1.5 opacity-90 hover:opacity-100 transition">
+                <span className="w-5 h-5 rounded-md bg-[#d82c23] text-white flex items-center justify-center font-black text-[10px] shadow-sm">
+                  S
+                </span>
+                <span className="text-[11px] font-black tracking-wide text-zinc-300">SHALOM</span>
+              </div>
+
+              <div className="h-4 w-px bg-zinc-800"></div>
+
+              {/* OLVA COURIER */}
+              <div className="flex items-center gap-1.5 opacity-90 hover:opacity-100 transition">
+                <span className="w-5 h-5 rounded-md bg-[#FFCC00] text-zinc-950 flex items-center justify-center font-black text-[10px] shadow-sm">
+                  O
+                </span>
+                <span className="text-[11px] font-black tracking-wide text-zinc-300">OLVA</span>
+              </div>
+
+            </div>
+
+            {/* FORMULARIO DE ACCESO */}
+            <form onSubmit={handleLogin} className="space-y-4">
+              
+              {loginError && (
+                <div className="bg-rose-950/40 border border-rose-800/80 text-rose-300 text-xs p-3 rounded-xl flex items-center gap-2">
+                  <span>⚠️</span>
+                  <span>{loginError}</span>
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                  Correo Electrónico
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="admin@mitienda.pe"
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-750 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-zinc-500 focus:outline-none transition"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                  Contraseña
+                </label>
+                <input
+                  type="password"
+                  required
+                  placeholder="••••••••••••"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  className="w-full bg-zinc-900 border border-zinc-750 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-zinc-500 focus:outline-none transition"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSubmittingAuth}
+                className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs py-3 rounded-xl transition shadow-lg shadow-emerald-950/30 flex items-center justify-center gap-2 mt-2 cursor-pointer"
+              >
+                {isSubmittingAuth ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin"></span>
+                    <span>Validando acceso...</span>
+                  </>
+                ) : (
+                  <span>Ingresar al Dashboard →</span>
+                )}
+              </button>
+            </form>
+
+            {/* PIE CON SELLO DE SEGURIDAD */}
+            <div className="pt-3 border-t border-zinc-800/80 text-center">
+              <span className="text-[10px] text-zinc-500 flex items-center justify-center gap-1.5">
+                <svg className="w-3 h-3 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                Protegido por Supabase Auth • Encriptación SSL 256-bit
+              </span>
+            </div>
+
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  // ================= 3. DASHBOARD AUTORIZADO =================
   return (
     <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
 
-        {/* HEADER PERSONALIZADO & NAVEGACIÓN */}
+        {/* HEADER & NAVEGACIÓN */}
         <header className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
           <div>
             <div className="flex items-center gap-3">
@@ -521,30 +680,42 @@ export default function CodDashboard() {
             </p>
           </div>
 
-          <div className="flex bg-zinc-900/90 p-1 rounded-xl border border-zinc-800">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex bg-zinc-900/90 p-1 rounded-xl border border-zinc-800">
+              <button
+                onClick={() => setActiveTab('ventas')}
+                className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition ${
+                  activeTab === 'ventas' ? 'bg-emerald-600 text-white shadow' : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                1. Ventas ({dateFilteredOrders.length})
+              </button>
+              <button
+                onClick={() => setActiveTab('logistica')}
+                className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition ${
+                  activeTab === 'logistica' ? 'bg-blue-600 text-white shadow' : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                2. Logística & Stock
+              </button>
+              <button
+                onClick={() => setActiveTab('metricas')}
+                className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition ${
+                  activeTab === 'metricas' ? 'bg-purple-600 text-white shadow' : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                3. Métricas Reales
+              </button>
+            </div>
+
+            {/* BOTÓN CERRAR SESIÓN */}
             <button
-              onClick={() => setActiveTab('ventas')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition ${
-                activeTab === 'ventas' ? 'bg-emerald-600 text-white shadow' : 'text-zinc-400 hover:text-white'
-              }`}
+              onClick={handleLogout}
+              title="Cerrar sesión de forma segura"
+              className="bg-zinc-900 hover:bg-rose-950/40 text-zinc-400 hover:text-rose-400 border border-zinc-800 hover:border-rose-900/40 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
             >
-              1. Ventas ({dateFilteredOrders.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('logistica')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition ${
-                activeTab === 'logistica' ? 'bg-blue-600 text-white shadow' : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              2. Logística & Stock
-            </button>
-            <button
-              onClick={() => setActiveTab('metricas')}
-              className={`px-4 py-2 rounded-lg text-xs font-bold uppercase transition ${
-                activeTab === 'metricas' ? 'bg-purple-600 text-white shadow' : 'text-zinc-400 hover:text-white'
-              }`}
-            >
-              3. Métricas Reales
+              <span>🔒</span>
+              <span className="hidden sm:inline">Salir</span>
             </button>
           </div>
         </header>
@@ -640,7 +811,7 @@ export default function CodDashboard() {
               </div>
             </div>
 
-            {/* ================= BARRA FLOTANTE DE RESUMEN SELECCIONADO ================= */}
+            {/* BARRA FLOTANTE DE RESUMEN SELECCIONADO */}
             {selectedOrders.length > 0 && (
               <div className="bg-gradient-to-r from-emerald-950/95 via-[#141922] to-[#141922] border-2 border-emerald-500 p-4 rounded-2xl flex flex-col md:flex-row items-center justify-between gap-4 shadow-2xl">
                 <div className="flex flex-wrap items-center gap-3">
@@ -684,7 +855,6 @@ export default function CodDashboard() {
                   </button>
                   <button
                     onClick={() => handleBulkStatusChange('entregado')}
-                    title="Liquida el saldo restante a S/ 0.00 en automático"
                     className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition border border-emerald-400 shadow"
                   >
                     Entregados (Liquidar)
@@ -713,9 +883,8 @@ export default function CodDashboard() {
               </div>
             )}
 
-            {/* ================= BARRA DE PESTAÑAS Y ACCIÓN RÁPIDA ================= */}
+            {/* BARRA DE PESTAÑAS Y ACCIÓN RÁPIDA */}
             <div className="flex flex-wrap items-center justify-between gap-3 bg-[#11141a] p-3 rounded-xl border border-zinc-800">
-              
               <div className="flex flex-wrap items-center gap-1.5">
                 {[
                   { id: 'todos', label: 'Todos', count: dateFilteredOrders.length, color: 'hover:bg-zinc-800' },
@@ -897,7 +1066,6 @@ export default function CodDashboard() {
                                 onKeyDown={(e) => {
                                   if (e.key === 'Enter') e.target.blur();
                                 }}
-                                title="Al colocar un monto > 0, el pedido se pasa a Confirmado en automático"
                                 className="w-16 bg-zinc-900 border border-zinc-700 hover:border-amber-500/50 focus:border-amber-400 text-amber-300 font-bold rounded px-1.5 py-0.5 text-right text-xs focus:outline-none transition"
                               />
                             </div>
