@@ -92,13 +92,17 @@ export default function CodDashboard() {
     localStorage.setItem(key, val);
   };
 
-  // ================= SINCRONIZACIÓN A GOOGLE SHEETS =================
+  // ================= ENVÍO A TRAVÉS DEL PUENTE SERVIDOR =================
   const sendOrderToGoogleSheet = async (order) => {
     const url = sheetWebhookUrl || localStorage.getItem('cod_sheet_url');
-    if (!url) return;
+    if (!url) {
+      setSyncStatus('⚠️ Falta pegar la URL en Logística');
+      setTimeout(() => setSyncStatus(''), 4000);
+      return;
+    }
 
     try {
-      setSyncStatus(`Enviando ${order.order_number} a Google Sheets...`);
+      setSyncStatus(`Enviando ${order.order_number}...`);
       const total = parseFloat(order.total_amount || 0);
       const advance = parseFloat(order.advance_payment || 0);
       const balance = Math.max(0, total - advance);
@@ -108,34 +112,40 @@ export default function CodDashboard() {
 
       const productsSummary = order.items && Array.isArray(order.items)
         ? order.items.map((it) => `${it.title} (x${it.quantity})`).join(', ')
-        : 'Producto General';
+        : 'Producto';
 
       const payload = {
-        order_number: order.order_number,
-        date: dateFormatted,
-        customer_name: order.customer_name,
-        phone: order.phone,
-        customer_dni: order.customer_dni || '',
-        zone: order.zone || 'lima',
-        city: order.city || '',
-        address: order.address || '',
-        products: productsSummary,
-        balance: balance,
-        seller: order.assigned_seller || 'Vendedora 1',
+        sheetUrl: url,
+        orderData: {
+          order_number: order.order_number,
+          date: dateFormatted,
+          customer_name: order.customer_name,
+          phone: order.phone,
+          customer_dni: order.customer_dni || '',
+          zone: order.zone || 'lima',
+          city: order.city || '',
+          address: order.address || '',
+          products: productsSummary,
+          balance: balance,
+          seller: order.assigned_seller || 'Vendedora 1',
+        }
       };
 
-      await fetch(url, {
+      const res = await fetch('/api/sync-sheet', {
         method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'text/plain' },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
-      setSyncStatus(`✓ ${order.order_number} sincronizado en Sheets`);
+      if (res.ok) {
+        setSyncStatus(`✓ ${order.order_number} escrito en Sheets`);
+      } else {
+        setSyncStatus('⚠️ Error al procesar en servidor');
+      }
       setTimeout(() => setSyncStatus(''), 3500);
     } catch (err) {
       console.error('Error al sincronizar con Google Sheets:', err);
-      setSyncStatus('⚠️ Error al enviar a Sheets');
+      setSyncStatus('⚠️ Error de conexión');
       setTimeout(() => setSyncStatus(''), 4000);
     }
   };
@@ -158,7 +168,7 @@ export default function CodDashboard() {
       fetchData();
 
       const channel = supabase
-        .channel('realtime_dashboard_sheet')
+        .channel('realtime_dashboard_final_sheet')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
         .subscribe();
