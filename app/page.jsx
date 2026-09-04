@@ -74,9 +74,9 @@ export default function CodDashboard() {
   const [sheetWebhookUrl, setSheetWebhookUrl] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
 
-  // Telegram Config
-  const [tgToken, setTgToken] = useState('8949067622:AAHrf1WHAsZEs5ZJYJ9YiKCrAZew2TXvu6Y');
-  const [tgChatId, setTgChatId] = useState('1072898889');
+  // Telegram Config (Sin hardcodear secretos)
+  const [tgToken, setTgToken] = useState('');
+  const [tgChatId, setTgChatId] = useState('');
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -84,8 +84,8 @@ export default function CodDashboard() {
       setFleteLima(localStorage.getItem('cod_flete_lima') || '12');
       setFleteProv(localStorage.getItem('cod_flete_prov') || '15');
       setSheetWebhookUrl(localStorage.getItem('cod_sheet_url') || '');
-      setTgToken(localStorage.getItem('cod_tg_token') || '8949067622:AAHrf1WHAsZEs5ZJYJ9YiKCrAZew2TXvu6Y');
-      setTgChatId(localStorage.getItem('cod_tg_chatid') || '1072898889');
+      setTgToken(localStorage.getItem('cod_tg_token') || '');
+      setTgChatId(localStorage.getItem('cod_tg_chatid') || '');
 
       const todayStr = new Date().toISOString().split('T')[0];
       setCustomStart(todayStr);
@@ -100,8 +100,8 @@ export default function CodDashboard() {
 
   // ================= NOTIFICACIÓN A TELEGRAM =================
   const sendTelegramNotification = async (order) => {
-    const token = tgToken || localStorage.getItem('cod_tg_token') || '8949067622:AAHrf1WHAsZEs5ZJYJ9YiKCrAZew2TXvu6Y';
-    const chatId = tgChatId || localStorage.getItem('cod_tg_chatid') || '1072898889';
+    const token = tgToken || localStorage.getItem('cod_tg_token');
+    const chatId = tgChatId || localStorage.getItem('cod_tg_chatid');
     if (!token || !chatId) return;
 
     try {
@@ -204,7 +204,7 @@ export default function CodDashboard() {
       fetchData();
 
       const channel = supabase
-        .channel('realtime_dashboard_tg')
+        .channel('realtime_dashboard_clean')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
         .subscribe();
@@ -292,7 +292,6 @@ export default function CodDashboard() {
 
     await supabase.from('orders').update(payload).eq('id', order.id);
 
-    // SINCRONIZAR SHEETS Y TELEGRAM AL CONFIRMAR
     if (newStatus === 'confirmado') {
       const updatedOrder = { ...order, status: 'confirmado' };
       sendOrderToGoogleSheet(updatedOrder);
@@ -458,7 +457,7 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // ================= CÁLCULO DE MÉTRICAS =================
+  // ================= MÉTRICAS =================
   const metrics = useMemo(() => {
     const totalShopifyOrders = dateFilteredOrders.length;
     const atenderOrders = dateFilteredOrders.filter((o) => o.status === 'atender');
@@ -678,25 +677,6 @@ export default function CodDashboard() {
               </div>
               <h1 className="text-2xl font-black tracking-tight text-white mt-1">Centro de Mando</h1>
               <p className="text-xs text-zinc-400">Ingresa con tu correo autorizado para gestionar ventas y caja.</p>
-            </div>
-
-            <div className="bg-zinc-950/80 border border-zinc-850 p-3 rounded-2xl flex items-center justify-around gap-2">
-              <div className="flex items-center gap-1.5 opacity-90">
-                <svg className="w-5 h-5 text-[#95BF47]" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M19.34 7.21c-.06-.18-.23-.3-.42-.31-.19-.01-5.18-.32-5.18-.32s-1.38-4.22-1.47-4.49c-.09-.27-.3-.49-.62-.49h-.29c-.06 0-.13.01-.19.03-.04.01-3.69 1.15-3.69 1.15s-2.31-.77-2.48-.77c-.32 0-.6.2-.68.5-.09.34-1.33 5.37-1.33 5.37s-2.07.63-2.26.69c-.3.09-.5.36-.49.68.12 2.82 2.22 13.06 2.22 13.06.2 1 .99 1.69 2.01 1.69h8.92c1.02 0 1.81-.69 2.01-1.69l3.52-14.73c.05-.22 0-.46-.15-.62zm-6.27-.61l-1.07-3.28 2.88.18-1.81 3.1zm-3.05-.95l.93-2.83 1.13 3.44-2.06-.61zm-1.83 1.93l1.19.36-1.57 3.32-.47-3.03.85-.65zm-2.09.64l.97.3-1.67 11.83-.87-5.59 1.57-6.54zm3.01 12.79l2.25-10.42 1.48.45-2.26 10.42-1.47-.45zm5.72-9.97l-2.25 10.42-1.48-.45 2.26-10.42 1.47.45zm1.88 9.53l-1.67-11.83.97-.3 1.57 6.54-.87 5.59z" />
-                </svg>
-                <span className="text-[11px] font-black text-zinc-300">Shopify</span>
-              </div>
-              <div className="h-4 w-px bg-zinc-800"></div>
-              <div className="flex items-center gap-1.5 opacity-90">
-                <span className="w-5 h-5 rounded-md bg-[#d82c23] text-white flex items-center justify-center font-black text-[10px]">S</span>
-                <span className="text-[11px] font-black text-zinc-300">SHALOM</span>
-              </div>
-              <div className="h-4 w-px bg-zinc-800"></div>
-              <div className="flex items-center gap-1.5 opacity-90">
-                <span className="w-5 h-5 rounded-md bg-[#FFCC00] text-zinc-950 flex items-center justify-center font-black text-[10px]">O</span>
-                <span className="text-[11px] font-black text-zinc-300">OLVA</span>
-              </div>
             </div>
 
             <form onSubmit={handleLogin} className="space-y-4">
@@ -1260,7 +1240,6 @@ export default function CodDashboard() {
 
                           <td className="py-3 px-3">
                             <div className="flex items-center justify-center gap-1.5">
-                              {/* Reenviar Sheets */}
                               <button
                                 onClick={() => sendOrderToGoogleSheet(order)}
                                 title="Enviar a Google Sheets"
@@ -1268,7 +1247,6 @@ export default function CodDashboard() {
                               >
                                 📊
                               </button>
-                              {/* Reenviar Telegram */}
                               <button
                                 onClick={() => sendTelegramNotification(order)}
                                 title="Enviar alerta a Telegram"
@@ -1314,12 +1292,11 @@ export default function CodDashboard() {
         )}
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 2: LOGÍSTICA & CONTROL DE STOCK + SHEETS + TELEGRAM CONFIG        */}
+        {/* SECCIÓN 2: LOGÍSTICA & CONTROL DE STOCK                                   */}
         {/* ========================================================================= */}
         {activeTab === 'logistica' && (
           <section className="space-y-6">
             
-            {/* GOOGLE SHEETS & TELEGRAM CONFIG */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               
               <div className="bg-[#11141a] p-5 rounded-2xl border border-emerald-500/40 shadow-xl space-y-3">
@@ -1349,21 +1326,21 @@ export default function CodDashboard() {
                     <h3 className="text-sm font-bold text-white uppercase tracking-wider">Telegram Bot (Alertas)</h3>
                   </div>
                   <span className="text-[10px] font-mono text-blue-400 bg-blue-500/10 border border-blue-500/30 px-2.5 py-0.5 rounded-full">
-                    CONFIGURADO
+                    CONFIGURAR
                   </span>
                 </div>
-                <p className="text-xs text-zinc-400">Token y Chat ID para alertas en tiempo real.</p>
+                <p className="text-xs text-zinc-400">Pega aquí tu Token de BotFather y tu Chat ID personal.</p>
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     type="text"
-                    placeholder="Bot Token"
+                    placeholder="Bot Token (Ej: 8949...)"
                     value={tgToken}
                     onChange={(e) => saveConfig('cod_tg_token', e.target.value, setTgToken)}
                     className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
                   />
                   <input
                     type="text"
-                    placeholder="Chat ID"
+                    placeholder="Chat ID (Ej: 1072...)"
                     value={tgChatId}
                     onChange={(e) => saveConfig('cod_tg_chatid', e.target.value, setTgChatId)}
                     className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
@@ -1401,7 +1378,7 @@ export default function CodDashboard() {
                     placeholder="Costo S/"
                     value={newProdCost}
                     onChange={(e) => setNewProdCost(e.target.value)}
-                    className="w-20 bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1 text-xs text-white"
+                    className="w-20 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-white"
                   />
                   <button type="submit" className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1 rounded">
                     + Añadir
