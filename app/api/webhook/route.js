@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '../../../lib/supabase';
 
-// Diccionario de distritos y abreviaturas de Lima y Callao
+// Diccionario de distritos de Lima y Callao
 const LIMA_DISTRICTS = [
   'lima', 'callao', 'sjl', 'san juan de lurigancho', 'smp', 'san martin de porres',
   'ves', 'villa el salvador', 'vmt', 'villa maria del triunfo', 'ate', 'vitarte',
@@ -39,7 +39,7 @@ export async function POST(req) {
     const city = shipping.city || billing.city || shipping.province || billing.province || 'Lima';
     const address = shipping.address1 || billing.address1 || 'Entrega coordinada';
 
-    // Detección inteligente de zona (Lima vs Provincia)
+    // Detección de zona
     const textToCheck = `${city} ${address}`.toLowerCase();
     const isLima = LIMA_DISTRICTS.some((district) => textToCheck.includes(district));
     const zone = isLima ? 'lima' : 'provincia';
@@ -65,6 +65,16 @@ export async function POST(req) {
       variant: item.variant_title || '',
     }));
 
+    // REPARTO 50/50 AUTOMÁTICO (ROUND-ROBIN)
+    const { data: lastOrder } = await supabase
+      .from('orders')
+      .select('assigned_seller')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const nextSeller = lastOrder?.assigned_seller === 'Vendedora 1' ? 'Vendedora 2' : 'Vendedora 1';
+
     const orderData = {
       shopify_order_id: orderId,
       order_number: orderNumber,
@@ -78,7 +88,8 @@ export async function POST(req) {
       courier: zone === 'lima' ? 'motorizado' : 'shalom',
       total_amount: totalAmount,
       advance_payment: 0.00,
-      status: 'pendiente',
+      status: 'atender', // ESTADO DE ENTRADA POR DEFECTO
+      assigned_seller: nextSeller, // ASIGNACIÓN EQUITATIVA
       items: items,
       order_hour: orderHour,
     };
@@ -87,7 +98,20 @@ export async function POST(req) {
 
     let dbError = null;
     if (existing) {
-      const { error } = await supabase.from('orders').update(orderData).eq('shopify_order_id', orderId);
+      // Si ya existe, actualizamos datos sin sobreescribir vendedora ni estado
+      const { error } = await supabase.from('orders').update({
+        customer_name: customerName,
+        customer_dni: dni || null,
+        phone: phone,
+        city: city,
+        address: address,
+        zone: zone,
+        delivery_type: deliveryType,
+        courier: zone === 'lima' ? 'motorizado' : 'shalom',
+        total_amount: totalAmount,
+        items: items,
+        order_hour: orderHour,
+      }).eq('shopify_order_id', orderId);
       dbError = error;
     } else {
       const { error } = await supabase.from('orders').insert([orderData]);
@@ -99,7 +123,7 @@ export async function POST(req) {
       return NextResponse.json({ error: dbError.message }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true, order: orderNumber }, { status: 200 });
+    return NextResponse.json({ ok: true, order: orderNumber, seller: nextSeller }, { status: 200 });
   } catch (err) {
     console.error('Error webhook:', err);
     return NextResponse.json({ error: err.message }, { status: 400 });
