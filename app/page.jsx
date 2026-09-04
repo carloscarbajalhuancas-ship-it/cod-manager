@@ -74,9 +74,12 @@ export default function CodDashboard() {
   const [sheetWebhookUrl, setSheetWebhookUrl] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
 
-  // Telegram Config (Sin hardcodear secretos)
+  // Telegram Config
   const [tgToken, setTgToken] = useState('');
   const [tgChatId, setTgChatId] = useState('');
+
+  // Configuración de vendedoras dinámicas
+  const [sellerCount, setSellerCount] = useState(2);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -97,6 +100,19 @@ export default function CodDashboard() {
     setter(val);
     localStorage.setItem(key, val);
   };
+
+  // Actualizar número de vendedoras en Supabase
+  const handleSellerCountChange = async (newCount) => {
+    const count = parseInt(newCount) || 1;
+    setSellerCount(count);
+    await supabase.from('settings').upsert({ key: 'seller_count', value: String(count) });
+    fetchData();
+  };
+
+  // Lista dinámica de vendedoras generada al instante (ej: ['Vendedora 1', 'Vendedora 2', 'Vendedora 3'])
+  const activeSellersList = useMemo(() => {
+    return Array.from({ length: sellerCount }, (_, i) => `Vendedora ${i + 1}`);
+  }, [sellerCount]);
 
   // ================= NOTIFICACIÓN A TELEGRAM =================
   const sendTelegramNotification = async (order) => {
@@ -138,7 +154,7 @@ export default function CodDashboard() {
     }
   };
 
-  // ================= SINCRONIZACIÓN A GOOGLE SHEETS =================
+  // ================= GOOGLE SHEETS SYNC =================
   const sendOrderToGoogleSheet = async (order) => {
     const url = sheetWebhookUrl || localStorage.getItem('cod_sheet_url');
     if (!url) return;
@@ -189,13 +205,17 @@ export default function CodDashboard() {
   const fetchData = async () => {
     if (!session) return;
     setLoading(true);
-    const [ordersRes, productsRes] = await Promise.all([
+    const [ordersRes, productsRes, settingsRes] = await Promise.all([
       supabase.from('orders').select('*').order('created_at', { ascending: false }),
-      supabase.from('products').select('*').order('name', { ascending: true })
+      supabase.from('products').select('*').order('name', { ascending: true }),
+      supabase.from('settings').select('value').eq('key', 'seller_count').maybeSingle()
     ]);
 
     if (ordersRes.data) setOrders(ordersRes.data);
     if (productsRes.data) setProducts(productsRes.data);
+    if (settingsRes.data && settingsRes.data.value) {
+      setSellerCount(parseInt(settingsRes.data.value) || 2);
+    }
     setLoading(false);
   };
 
@@ -204,9 +224,10 @@ export default function CodDashboard() {
       fetchData();
 
       const channel = supabase
-        .channel('realtime_dashboard_clean')
+        .channel('realtime_dashboard_dynamic_sellers')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' }, () => fetchData())
         .subscribe();
 
       return () => supabase.removeChannel(channel);
@@ -548,8 +569,11 @@ export default function CodDashboard() {
       }
     });
 
-    const v1Count = dateFilteredOrders.filter((o) => (o.assigned_seller || 'Vendedora 1') === 'Vendedora 1').length;
-    const v2Count = dateFilteredOrders.filter((o) => o.assigned_seller === 'Vendedora 2').length;
+    // Conteo dinámico por cada vendedora activa
+    const sellerCounts = {};
+    activeSellersList.forEach((s) => {
+      sellerCounts[s] = dateFilteredOrders.filter((o) => (o.assigned_seller || 'Vendedora 1') === s).length;
+    });
 
     return {
       totalShopifyOrders,
@@ -581,10 +605,9 @@ export default function CodDashboard() {
       roas,
       aov,
       soldByProduct,
-      v1Count,
-      v2Count,
+      sellerCounts,
     };
-  }, [dateFilteredOrders, products, adSpend, fleteLima, fleteProv]);
+  }, [dateFilteredOrders, products, adSpend, fleteLima, fleteProv, activeSellersList]);
 
   // ================= FILTRADO TABLA =================
   const visibleOrders = dateFilteredOrders.filter((o) => {
@@ -959,12 +982,12 @@ export default function CodDashboard() {
               </div>
             )}
 
-            {/* FILTROS DE ESTADO Y VENDEDORA */}
+            {/* FILTROS DE ESTADO Y VENDEDORAS DINÁMICAS */}
             <div className="bg-[#11141a] p-3.5 rounded-xl border border-zinc-800 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">Equipo de Ventas:</span>
-                  <div className="flex bg-zinc-900 p-1 rounded-xl border border-zinc-800 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">Equipo de Ventas ({sellerCount} Activas):</span>
+                  <div className="flex flex-wrap bg-zinc-900 p-1 rounded-xl border border-zinc-800 text-xs gap-1">
                     <button
                       onClick={() => setSellerFilter('todos')}
                       className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
@@ -973,22 +996,17 @@ export default function CodDashboard() {
                     >
                       Todas ({dateFilteredOrders.length})
                     </button>
-                    <button
-                      onClick={() => setSellerFilter('Vendedora 1')}
-                      className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
-                        sellerFilter === 'Vendedora 1' ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-white'
-                      }`}
-                    >
-                      <span>👩‍💼</span> Vendedora 1 ({metrics.v1Count})
-                    </button>
-                    <button
-                      onClick={() => setSellerFilter('Vendedora 2')}
-                      className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
-                        sellerFilter === 'Vendedora 2' ? 'bg-pink-600 text-white shadow' : 'text-zinc-400 hover:text-white'
-                      }`}
-                    >
-                      <span>👩‍💼</span> Vendedora 2 ({metrics.v2Count})
-                    </button>
+                    {activeSellersList.map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => setSellerFilter(s)}
+                        className={`px-3 py-1 rounded-lg text-xs font-bold transition flex items-center gap-1.5 ${
+                          sellerFilter === s ? 'bg-indigo-600 text-white shadow' : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        <span>👩‍💼</span> {s} ({metrics.sellerCounts[s] || 0})
+                      </button>
+                    ))}
                   </div>
                 </div>
 
@@ -1130,18 +1148,16 @@ export default function CodDashboard() {
                             {order.order_number}
                           </td>
 
+                          {/* SELECTOR DINÁMICO DE VENDEDORAS */}
                           <td className="py-3 px-3 whitespace-nowrap">
                             <select
                               value={sellerName}
                               onChange={(e) => updateField(order.id, 'assigned_seller', e.target.value)}
-                              className={`text-[10px] font-bold rounded-lg px-2 py-1 border cursor-pointer focus:outline-none ${
-                                sellerName === 'Vendedora 1'
-                                  ? 'bg-indigo-950/60 text-indigo-300 border-indigo-700/60'
-                                  : 'bg-pink-950/60 text-pink-300 border-pink-700/60'
-                              }`}
+                              className="text-[10px] font-bold rounded-lg px-2 py-1 border bg-zinc-900 text-zinc-200 border-zinc-700 cursor-pointer focus:outline-none"
                             >
-                              <option value="Vendedora 1">Vendedora 1</option>
-                              <option value="Vendedora 2">Vendedora 2</option>
+                              {activeSellersList.map((s) => (
+                                <option key={s} value={s}>{s}</option>
+                              ))}
                             </select>
                           </td>
 
@@ -1292,11 +1308,43 @@ export default function CodDashboard() {
         )}
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 2: LOGÍSTICA & CONTROL DE STOCK                                   */}
+        {/* SECCIÓN 2: LOGÍSTICA & STOCK + CONFIGURACIÓN DE VENDEDORAS                */}
         {/* ========================================================================= */}
         {activeTab === 'logistica' && (
           <section className="space-y-6">
             
+            {/* CONFIGURACIÓN DE VENDEDORAS (ROUND-ROBIN ESCALABLE) */}
+            <div className="bg-[#11141a] p-5 rounded-2xl border border-indigo-500/40 shadow-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">👩‍💼</span>
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">Gestión de Equipo de Ventas (Round-Robin Dinámico)</h3>
+                </div>
+                <span className="text-[10px] font-mono text-indigo-400 bg-indigo-500/10 border border-indigo-500/30 px-2.5 py-0.5 rounded-full">
+                  {sellerCount} VENDEDORAS ACTIVAS
+                </span>
+              </div>
+              <p className="text-xs text-zinc-400">
+                Selecciona cuántas vendedoras tienes trabajando. El webhook de Shopify distribuirá automáticamente los pedidos nuevos en partes iguales (1/N).
+              </p>
+              <div className="flex items-center gap-3 pt-1">
+                <label className="text-xs text-zinc-300 font-bold">Número de vendedoras:</label>
+                <select
+                  value={sellerCount}
+                  onChange={(e) => handleSellerCountChange(e.target.value)}
+                  className="bg-zinc-900 border border-zinc-700 text-white rounded-xl px-3 py-1.5 text-xs font-bold focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="1">1 Vendedora</option>
+                  <option value="2">2 Vendedoras</option>
+                  <option value="3">3 Vendedoras</option>
+                  <option value="4">4 Vendedoras</option>
+                  <option value="5">5 Vendedoras</option>
+                </select>
+                <span className="text-[11px] text-zinc-500">Se generarán: {activeSellersList.join(', ')}</span>
+              </div>
+            </div>
+
+            {/* GOOGLE SHEETS & TELEGRAM CONFIG */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               
               <div className="bg-[#11141a] p-5 rounded-2xl border border-emerald-500/40 shadow-xl space-y-3">
@@ -1333,14 +1381,14 @@ export default function CodDashboard() {
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     type="text"
-                    placeholder="Bot Token (Ej: 8949...)"
+                    placeholder="Bot Token"
                     value={tgToken}
                     onChange={(e) => saveConfig('cod_tg_token', e.target.value, setTgToken)}
                     className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
                   />
                   <input
                     type="text"
-                    placeholder="Chat ID (Ej: 1072...)"
+                    placeholder="Chat ID"
                     value={tgChatId}
                     onChange={(e) => saveConfig('cod_tg_chatid', e.target.value, setTgChatId)}
                     className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
@@ -1770,8 +1818,9 @@ export default function CodDashboard() {
                     onChange={(e) => setEditingOrder({ ...editingOrder, assigned_seller: e.target.value })}
                     className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-white"
                   >
-                    <option value="Vendedora 1">Vendedora 1</option>
-                    <option value="Vendedora 2">Vendedora 2</option>
+                    {activeSellersList.map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
