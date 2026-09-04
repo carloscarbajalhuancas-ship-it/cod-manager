@@ -60,7 +60,7 @@ export default function CodDashboard() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('todos');
   const [zoneFilter, setZoneFilter] = useState('todos');
-  const [sellerFilter, setSellerFilter] = useState('todos'); // 'todos' | 'Vendedora 1' | 'Vendedora 2'
+  const [sellerFilter, setSellerFilter] = useState('todos');
 
   const [editingOrder, setEditingOrder] = useState(null);
 
@@ -71,12 +71,15 @@ export default function CodDashboard() {
   const [adSpend, setAdSpend] = useState('');
   const [fleteLima, setFleteLima] = useState('12');
   const [fleteProv, setFleteProv] = useState('15');
+  const [sheetWebhookUrl, setSheetWebhookUrl] = useState('');
+  const [syncStatus, setSyncStatus] = useState('');
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
       setAdSpend(localStorage.getItem('cod_spend') || '');
       setFleteLima(localStorage.getItem('cod_flete_lima') || '12');
       setFleteProv(localStorage.getItem('cod_flete_prov') || '15');
+      setSheetWebhookUrl(localStorage.getItem('cod_sheet_url') || '');
 
       const todayStr = new Date().toISOString().split('T')[0];
       setCustomStart(todayStr);
@@ -87,6 +90,54 @@ export default function CodDashboard() {
   const saveConfig = (key, val, setter) => {
     setter(val);
     localStorage.setItem(key, val);
+  };
+
+  // ================= SINCRONIZACIÓN A GOOGLE SHEETS =================
+  const sendOrderToGoogleSheet = async (order) => {
+    const url = sheetWebhookUrl || localStorage.getItem('cod_sheet_url');
+    if (!url) return;
+
+    try {
+      setSyncStatus(`Enviando ${order.order_number} a Google Sheets...`);
+      const total = parseFloat(order.total_amount || 0);
+      const advance = parseFloat(order.advance_payment || 0);
+      const balance = Math.max(0, total - advance);
+
+      const dateObj = new Date(order.created_at || Date.now());
+      const dateFormatted = `${dateObj.toLocaleDateString('es-PE')} ${dateObj.toLocaleTimeString('es-PE', { hour: '2-digit', minute: '2-digit', hour12: true })}`;
+
+      const productsSummary = order.items && Array.isArray(order.items)
+        ? order.items.map((it) => `${it.title} (x${it.quantity})`).join(', ')
+        : 'Producto General';
+
+      const payload = {
+        order_number: order.order_number,
+        date: dateFormatted,
+        customer_name: order.customer_name,
+        phone: order.phone,
+        customer_dni: order.customer_dni || '',
+        zone: order.zone || 'lima',
+        city: order.city || '',
+        address: order.address || '',
+        products: productsSummary,
+        balance: balance,
+        seller: order.assigned_seller || 'Vendedora 1',
+      };
+
+      await fetch(url, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify(payload),
+      });
+
+      setSyncStatus(`✓ ${order.order_number} sincronizado en Sheets`);
+      setTimeout(() => setSyncStatus(''), 3500);
+    } catch (err) {
+      console.error('Error al sincronizar con Google Sheets:', err);
+      setSyncStatus('⚠️ Error al enviar a Sheets');
+      setTimeout(() => setSyncStatus(''), 4000);
+    }
   };
 
   const fetchData = async () => {
@@ -107,7 +158,7 @@ export default function CodDashboard() {
       fetchData();
 
       const channel = supabase
-        .channel('realtime_dashboard_seller')
+        .channel('realtime_dashboard_sheet')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
         .subscribe();
@@ -184,13 +235,21 @@ export default function CodDashboard() {
     const isOldConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(order.status);
     const isNewConfirmed = ['confirmado', 'en_ruta', 'entregado'].includes(newStatus);
 
-    if (!isOldConfirmed && isNewConfirmed) await adjustStock(order.items, -1);
-    else if (isOldConfirmed && !isNewConfirmed) await adjustStock(order.items, 1);
+    if (!isOldConfirmed && isNewConfirmed) {
+      await adjustStock(order.items, -1);
+    } else if (isOldConfirmed && !isNewConfirmed) {
+      await adjustStock(order.items, 1);
+    }
 
     const payload = { status: newStatus };
     if (newStatus === 'entregado') payload.advance_payment = parseFloat(order.total_amount) || 0;
 
     await supabase.from('orders').update(payload).eq('id', order.id);
+
+    if (newStatus === 'confirmado') {
+      sendOrderToGoogleSheet({ ...order, status: 'confirmado' });
+    }
+
     fetchData();
   };
 
@@ -201,7 +260,6 @@ export default function CodDashboard() {
     let newStatus = order.status;
     let shouldDeductStock = false;
 
-    // Si colocó adelanto y estaba por atender o pendiente, pasa a confirmado
     if (advance > 0 && ['atender', 'pendiente'].includes(order.status)) {
       newStatus = 'confirmado';
       shouldDeductStock = true;
@@ -213,6 +271,10 @@ export default function CodDashboard() {
       advance_payment: advance,
       status: newStatus,
     }).eq('id', order.id);
+
+    if (newStatus === 'confirmado') {
+      sendOrderToGoogleSheet({ ...order, advance_payment: advance, status: 'confirmado' });
+    }
 
     fetchData();
   };
@@ -232,6 +294,10 @@ export default function CodDashboard() {
       if (newStatus === 'entregado') payload.advance_payment = parseFloat(order.total_amount) || 0;
 
       await supabase.from('orders').update(payload).eq('id', order.id);
+
+      if (newStatus === 'confirmado') {
+        sendOrderToGoogleSheet({ ...order, status: 'confirmado' });
+      }
     }
 
     setSelectedOrders([]);
@@ -301,6 +367,11 @@ export default function CodDashboard() {
     };
 
     await supabase.from('orders').update(payload).eq('id', editingOrder.id);
+
+    if (targetStatus === 'confirmado') {
+      sendOrderToGoogleSheet({ ...editingOrder, status: 'confirmado' });
+    }
+
     setEditingOrder(null);
     fetchData();
   };
@@ -423,7 +494,6 @@ export default function CodDashboard() {
       }
     });
 
-    // Conteo por vendedora
     const v1Count = dateFilteredOrders.filter((o) => (o.assigned_seller || 'Vendedora 1') === 'Vendedora 1').length;
     const v2Count = dateFilteredOrders.filter((o) => o.assigned_seller === 'Vendedora 2').length;
 
@@ -531,7 +601,6 @@ export default function CodDashboard() {
     );
   };
 
-  // 1. CARGA INICIAL
   if (authLoading) {
     return (
       <div className="min-h-screen bg-[#090b0e] flex flex-col items-center justify-center text-zinc-400 font-sans">
@@ -541,7 +610,6 @@ export default function CodDashboard() {
     );
   }
 
-  // 2. LOGIN
   if (!session) {
     return (
       <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased flex items-center justify-center p-4 relative overflow-hidden">
@@ -622,12 +690,11 @@ export default function CodDashboard() {
     );
   }
 
-  // 3. DASHBOARD AUTORIZADO
   return (
     <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
 
-        {/* HEADER & NAVEGACIÓN */}
+        {/* HEADER */}
         <header className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
           <div>
             <div className="flex items-center gap-3">
@@ -638,6 +705,11 @@ export default function CodDashboard() {
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
                 EN VIVO
               </span>
+              {syncStatus && (
+                <span className="text-[11px] font-mono font-bold text-emerald-400 bg-emerald-950/60 border border-emerald-500/40 px-2.5 py-0.5 rounded-full animate-bounce">
+                  {syncStatus}
+                </span>
+              )}
             </div>
             <p className="text-xs text-zinc-400 mt-1">Monitoreo de pedidos, despachos y dinero en mano</p>
           </div>
@@ -732,14 +804,13 @@ export default function CodDashboard() {
         </section>
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 1: BANDEJA DE VENTAS CON VENDEDORAS & ATENDER                     */}
+        {/* SECCIÓN 1: BANDEJA DE VENTAS                                              */}
         {/* ========================================================================= */}
         {activeTab === 'ventas' && (
           <section className="space-y-4">
             
             {/* TARJETAS OPERATIVAS */}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-              {/* Tarjeta Alerta Atender */}
               <div className="bg-[#11141a] border-2 border-amber-500/50 p-3.5 rounded-xl flex items-center justify-between">
                 <div>
                   <span className="text-[10px] font-black uppercase text-amber-400 block flex items-center gap-1">
@@ -816,7 +887,7 @@ export default function CodDashboard() {
                     onClick={() => handleBulkStatusChange('confirmado')}
                     className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition"
                   >
-                    Confirmados
+                    Confirmados (→ Sheets)
                   </button>
                   <button
                     onClick={() => handleBulkStatusChange('en_ruta')}
@@ -855,8 +926,6 @@ export default function CodDashboard() {
 
             {/* FILTROS POR ESTADO + FILTRO POR VENDEDORA */}
             <div className="bg-[#11141a] p-3.5 rounded-xl border border-zinc-800 space-y-3">
-              
-              {/* FILTRO DE VENDEDORA (ROUND ROBIN VIEW) */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-2.5">
                 <div className="flex items-center gap-2">
                   <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">Equipo de Ventas:</span>
@@ -896,7 +965,6 @@ export default function CodDashboard() {
                 </button>
               </div>
 
-              {/* FILTRO DE ESTADOS */}
               <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                 <div className="flex flex-wrap items-center gap-1.5">
                   {[
@@ -937,7 +1005,6 @@ export default function CodDashboard() {
                   ))}
                 </div>
               </div>
-
             </div>
 
             {/* BUSCADOR */}
@@ -1028,7 +1095,6 @@ export default function CodDashboard() {
                             {order.order_number}
                           </td>
 
-                          {/* SELECTOR / BADGE VENDEDORA */}
                           <td className="py-3 px-3 whitespace-nowrap">
                             <select
                               value={sellerName}
@@ -1109,7 +1175,7 @@ export default function CodDashboard() {
                             )}
                           </td>
 
-                          {/* SELECTOR DE ESTADO (CON "ATENDER") */}
+                          {/* ESTADO */}
                           <td className="py-3 px-3">
                             <select
                               value={order.status || 'atender'}
@@ -1137,14 +1203,22 @@ export default function CodDashboard() {
                             </select>
                           </td>
 
+                          {/* ACCIONES */}
                           <td className="py-3 px-3">
                             <div className="flex items-center justify-center gap-1.5">
+                              <button
+                                onClick={() => sendOrderToGoogleSheet(order)}
+                                title="Enviar manualmente a Google Sheets"
+                                className="bg-emerald-950/60 hover:bg-emerald-900 text-emerald-400 p-1 rounded text-xs border border-emerald-500/40 transition"
+                              >
+                                📊
+                              </button>
                               <a
                                 href={waUrl}
                                 target="_blank"
                                 rel="noreferrer"
                                 title="WhatsApp"
-                                className={`px-2.5 py-1 rounded text-[11px] font-bold text-white transition ${
+                                className={`px-2 py-1 rounded text-[11px] font-bold text-white transition ${
                                   order.status === 'cancelado' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-emerald-600 hover:bg-emerald-500'
                                 }`}
                               >
@@ -1177,10 +1251,37 @@ export default function CodDashboard() {
         )}
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 2: LOGÍSTICA & CONTROL DE STOCK                                   */}
+        {/* SECCIÓN 2: LOGÍSTICA & CONTROL DE STOCK + WEBHOOK DE GOOGLE SHEETS        */}
         {/* ========================================================================= */}
         {activeTab === 'logistica' && (
           <section className="space-y-6">
+            
+            {/* CONFIGURACIÓN GOOGLE SHEETS */}
+            <div className="bg-[#11141a] p-5 rounded-2xl border border-emerald-500/40 shadow-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">📊</span>
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">Conexión con Google Sheets (Almacén & Empaque)</h3>
+                </div>
+                <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-0.5 rounded-full">
+                  AUTOSYNC ACTIVO
+                </span>
+              </div>
+              <p className="text-xs text-zinc-400">
+                Pega aquí la URL de la aplicación web de Google Apps Script. Los pedidos confirmados se enviarán de inmediato a tu hoja protegida.
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
+                  value={sheetWebhookUrl}
+                  onChange={(e) => saveConfig('cod_sheet_url', e.target.value, setSheetWebhookUrl)}
+                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-emerald-300 font-mono focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+            </div>
+
+            {/* INVENTARIO */}
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-zinc-800 pb-3">
                 <div>
