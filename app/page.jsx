@@ -63,7 +63,7 @@ export default function CodDashboard() {
   const [sellerFilter, setSellerFilter] = useState('todos');
 
   const [editingOrder, setEditingOrder] = useState(null);
-  const [showSettingsModal, setShowSettingsModal] = useState(false); // MODAL DE CONFIGURACIÓN
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
 
   const [newProdName, setNewProdName] = useState('');
   const [newProdStock, setNewProdStock] = useState('');
@@ -223,7 +223,7 @@ export default function CodDashboard() {
       fetchData();
 
       const channel = supabase
-        .channel('realtime_dashboard_settings_modal')
+        .channel('realtime_dashboard_seller_perf')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' }, () => fetchData())
@@ -477,7 +477,7 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // ================= MÉTRICAS =================
+  // ================= MÉTRICAS & RENDIMIENTO DE VENDEDORAS (BASADO EN ENTREGADOS) =================
   const metrics = useMemo(() => {
     const totalShopifyOrders = dateFilteredOrders.length;
     const atenderOrders = dateFilteredOrders.filter((o) => o.status === 'atender');
@@ -568,9 +568,28 @@ export default function CodDashboard() {
       }
     });
 
+    // Conteo general para filtros de vendedoras
     const sellerCounts = {};
     activeSellersList.forEach((s) => {
       sellerCounts[s] = dateFilteredOrders.filter((o) => (o.assigned_seller || 'Vendedora 1') === s).length;
+    });
+
+    // RENDIMIENTO DETALLADO POR VENDEDORA (BASADO EN PEDIDOS ENTREGADOS)
+    const sellerPerformance = {};
+    activeSellersList.forEach((s) => {
+      const sOrders = dateFilteredOrders.filter((o) => (o.assigned_seller || 'Vendedora 1') === s);
+      const totalLeads = sOrders.length;
+      const delivered = sOrders.filter((o) => o.status === 'entregado');
+      const deliveredCount = delivered.length;
+      const deliveredRevenue = delivered.reduce((acc, o) => acc + (parseFloat(o.total_amount) || 0), 0);
+      const successRate = totalLeads > 0 ? ((deliveredCount / totalLeads) * 100).toFixed(1) : 0;
+
+      sellerPerformance[s] = {
+        totalLeads,
+        deliveredCount,
+        deliveredRevenue,
+        successRate,
+      };
     });
 
     return {
@@ -604,6 +623,7 @@ export default function CodDashboard() {
       aov,
       soldByProduct,
       sellerCounts,
+      sellerPerformance,
     };
   }, [dateFilteredOrders, products, adSpend, fleteLima, fleteProv, activeSellersList]);
 
@@ -1131,7 +1151,7 @@ export default function CodDashboard() {
                       } else if (order.zone === 'lima') {
                         waMessage = `Hola ${order.customer_name}, te saludamos para coordinar la entrega de tu pedido ${order.order_number} por S/ ${balance.toFixed(2)}. El despacho es a tu domicilio (${order.address}, ${order.city}) con motorizado contraentrega. ¿Me confirmas si estás disponible hoy?`;
                       } else {
-                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar el envío de তোমার pedido ${order.order_number} a ${order.city} por Shalom contraentrega por S/ ${balance.toFixed(2)}. ¿Me confirmas tu DNI${order.customer_dni ? ` (${order.customer_dni})` : ''} y tu agencia Shalom de retiro?`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar el envío de tu pedido ${order.order_number} a ${order.city} por Shalom contraentrega por S/ ${balance.toFixed(2)}. ¿Me confirmas tu DNI${order.customer_dni ? ` (${order.customer_dni})` : ''} y tu agencia Shalom de retiro?`;
                       }
 
                       const waUrl = `https://wa.me/51${cleanPhone}?text=${encodeURIComponent(waMessage)}`;
@@ -1320,8 +1340,6 @@ export default function CodDashboard() {
         {/* ========================================================================= */}
         {activeTab === 'logistica' && (
           <section className="space-y-6">
-            
-            {/* INVENTARIO */}
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-zinc-800 pb-3">
                 <div>
@@ -1462,10 +1480,59 @@ export default function CodDashboard() {
         )}
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 3: MÉTRICAS REALES Y FINANZAS                                     */}
+        {/* SECCIÓN 3: MÉTRICAS REALES Y RENDIMIENTO POR VENDEDORA                     */}
         {/* ========================================================================= */}
         {activeTab === 'metricas' && (
           <section className="space-y-6">
+            
+            {/* RENDIMIENTO DEL EQUIPO DE VENTAS (BASADO EN ENTREGADOS) */}
+            <div className="bg-[#11141a] p-5 rounded-2xl border border-purple-500/40 shadow-xl space-y-4">
+              <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">🏆</span>
+                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">Rendimiento del Equipo de Ventas (Basado en Pedidos Entregados)</h3>
+                </div>
+                <span className="text-[10px] font-mono text-purple-400 bg-purple-500/10 border border-purple-500/30 px-2.5 py-0.5 rounded-full">
+                  EXCLUYE CANCELADOS
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {activeSellersList.map((seller) => {
+                  const perf = metrics.sellerPerformance[seller] || { totalLeads: 0, deliveredCount: 0, deliveredRevenue: 0, successRate: 0 };
+                  
+                  return (
+                    <div key={seller} className="bg-zinc-950 p-4 rounded-xl border border-zinc-800 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white text-xs flex items-center gap-1.5">
+                          <span>👩‍💼</span> {seller}
+                        </span>
+                        <span className="text-[10px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30">
+                          {perf.successRate}% Efectividad
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs font-mono pt-1">
+                        <div className="bg-zinc-900/80 p-2 rounded-lg border border-zinc-850">
+                          <span className="text-[10px] text-zinc-400 uppercase block font-sans">Leads Asignados</span>
+                          <span className="text-white font-bold text-sm">{perf.totalLeads}</span>
+                        </div>
+                        <div className="bg-zinc-900/80 p-2 rounded-lg border border-zinc-850">
+                          <span className="text-[10px] text-emerald-400 uppercase block font-sans">Entregados (Éxito)</span>
+                          <span className="text-emerald-300 font-bold text-sm">{perf.deliveredCount} und</span>
+                        </div>
+                      </div>
+
+                      <div className="bg-emerald-950/20 border border-emerald-500/30 p-2.5 rounded-lg flex justify-between items-center text-xs font-mono">
+                        <span className="text-zinc-400 font-sans uppercase text-[10px] font-bold">Facturación Entregada:</span>
+                        <strong className="text-emerald-300 text-sm">S/ {perf.deliveredRevenue.toFixed(2)}</strong>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-3">
               <h3 className="text-xs font-bold uppercase text-zinc-400 tracking-wider">Configuración Financiera del Periodo</h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
