@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '../../../lib/supabase';
 
-// Diccionario de distritos de Lima y Callao
 const LIMA_DISTRICTS = [
   'lima', 'callao', 'sjl', 'san juan de lurigancho', 'smp', 'san martin de porres',
   'ves', 'villa el salvador', 'vmt', 'villa maria del triunfo', 'ate', 'vitarte',
@@ -39,7 +38,6 @@ export async function POST(req) {
     const city = shipping.city || billing.city || shipping.province || billing.province || 'Lima';
     const address = shipping.address1 || billing.address1 || 'Entrega coordinada';
 
-    // Detección de zona
     const textToCheck = `${city} ${address}`.toLowerCase();
     const isLima = LIMA_DISTRICTS.some((district) => textToCheck.includes(district));
     const zone = isLima ? 'lima' : 'provincia';
@@ -65,7 +63,14 @@ export async function POST(req) {
       variant: item.variant_title || '',
     }));
 
-    // REPARTO 50/50 AUTOMÁTICO (ROUND-ROBIN)
+    // 1. OBTENER NÚMERO DE VENDEDORAS CONFIGURADAS EN SUPABASE
+    let sellerCount = 2;
+    const { data: settingData } = await supabase.from('settings').select('value').eq('key', 'seller_count').maybeSingle();
+    if (settingData && settingData.value) {
+      sellerCount = parseInt(settingData.value) || 2;
+    }
+
+    // 2. OBTENER EL ÚLTIMO PEDIDO PARA CICLAR EL ROUND-ROBIN
     const { data: lastOrder } = await supabase
       .from('orders')
       .select('assigned_seller')
@@ -73,7 +78,14 @@ export async function POST(req) {
       .limit(1)
       .maybeSingle();
 
-    const nextSeller = lastOrder?.assigned_seller === 'Vendedora 1' ? 'Vendedora 2' : 'Vendedora 1';
+    let lastNum = 0;
+    if (lastOrder && lastOrder.assigned_seller) {
+      const match = lastOrder.assigned_seller.match(/\d+/);
+      if (match) lastNum = parseInt(match[0]);
+    }
+
+    const nextNum = (lastNum % sellerCount) + 1;
+    const nextSeller = `Vendedora ${nextNum}`;
 
     const orderData = {
       shopify_order_id: orderId,
@@ -88,8 +100,8 @@ export async function POST(req) {
       courier: zone === 'lima' ? 'motorizado' : 'shalom',
       total_amount: totalAmount,
       advance_payment: 0.00,
-      status: 'atender', // ESTADO DE ENTRADA POR DEFECTO
-      assigned_seller: nextSeller, // ASIGNACIÓN EQUITATIVA
+      status: 'atender',
+      assigned_seller: nextSeller, // REPARTO ESCALABLE DINÁMICO
       items: items,
       order_hour: orderHour,
     };
@@ -98,7 +110,6 @@ export async function POST(req) {
 
     let dbError = null;
     if (existing) {
-      // Si ya existe, actualizamos datos sin sobreescribir vendedora ni estado
       const { error } = await supabase.from('orders').update({
         customer_name: customerName,
         customer_dni: dni || null,
