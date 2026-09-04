@@ -63,6 +63,7 @@ export default function CodDashboard() {
   const [sellerFilter, setSellerFilter] = useState('todos');
 
   const [editingOrder, setEditingOrder] = useState(null);
+  const [showSettingsModal, setShowSettingsModal] = useState(false); // MODAL DE CONFIGURACIÓN
 
   const [newProdName, setNewProdName] = useState('');
   const [newProdStock, setNewProdStock] = useState('');
@@ -101,7 +102,6 @@ export default function CodDashboard() {
     localStorage.setItem(key, val);
   };
 
-  // Actualizar número de vendedoras en Supabase
   const handleSellerCountChange = async (newCount) => {
     const count = parseInt(newCount) || 1;
     setSellerCount(count);
@@ -109,7 +109,6 @@ export default function CodDashboard() {
     fetchData();
   };
 
-  // Lista dinámica de vendedoras generada al instante (ej: ['Vendedora 1', 'Vendedora 2', 'Vendedora 3'])
   const activeSellersList = useMemo(() => {
     return Array.from({ length: sellerCount }, (_, i) => `Vendedora ${i + 1}`);
   }, [sellerCount]);
@@ -224,7 +223,7 @@ export default function CodDashboard() {
       fetchData();
 
       const channel = supabase
-        .channel('realtime_dashboard_dynamic_sellers')
+        .channel('realtime_dashboard_settings_modal')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' }, () => fetchData())
@@ -569,7 +568,6 @@ export default function CodDashboard() {
       }
     });
 
-    // Conteo dinámico por cada vendedora activa
     const sellerCounts = {};
     activeSellersList.forEach((s) => {
       sellerCounts[s] = dateFilteredOrders.filter((o) => (o.assigned_seller || 'Vendedora 1') === s).length;
@@ -752,7 +750,7 @@ export default function CodDashboard() {
     <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
 
-        {/* HEADER & SYNC */}
+        {/* HEADER & SETTINGS BUTTON */}
         <header className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
           <div>
             <div className="flex items-center gap-3">
@@ -800,10 +798,21 @@ export default function CodDashboard() {
               </button>
             </div>
 
+            {/* BOTÓN DE CONFIGURACIÓN ⚙️ */}
+            <button
+              onClick={() => setShowSettingsModal(true)}
+              title="Ajustes y Credenciales del Sistema"
+              className="bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-800 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+            >
+              <span>⚙️</span>
+              <span className="hidden sm:inline">Ajustes</span>
+            </button>
+
+            {/* BOTÓN CERRAR SESIÓN */}
             <button
               onClick={handleLogout}
               title="Cerrar sesión"
-              className="bg-zinc-900 hover:bg-rose-950/40 text-zinc-400 hover:text-rose-400 border border-zinc-800 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
+              className="bg-zinc-900 hover:bg-rose-950/40 text-zinc-400 hover:text-rose-400 border border-zinc-800 px-3 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
             >
               <span>🔒</span>
               <span className="hidden sm:inline">Salir</span>
@@ -1122,7 +1131,7 @@ export default function CodDashboard() {
                       } else if (order.zone === 'lima') {
                         waMessage = `Hola ${order.customer_name}, te saludamos para coordinar la entrega de tu pedido ${order.order_number} por S/ ${balance.toFixed(2)}. El despacho es a tu domicilio (${order.address}, ${order.city}) con motorizado contraentrega. ¿Me confirmas si estás disponible hoy?`;
                       } else {
-                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar el envío de tu pedido ${order.order_number} a ${order.city} por Shalom contraentrega por S/ ${balance.toFixed(2)}. ¿Me confirmas tu DNI${order.customer_dni ? ` (${order.customer_dni})` : ''} y tu agencia Shalom de retiro?`;
+                        waMessage = `Hola ${order.customer_name}, te saludamos para coordinar el envío de তোমার pedido ${order.order_number} a ${order.city} por Shalom contraentrega por S/ ${balance.toFixed(2)}. ¿Me confirmas tu DNI${order.customer_dni ? ` (${order.customer_dni})` : ''} y tu agencia Shalom de retiro?`;
                       }
 
                       const waUrl = `https://wa.me/51${cleanPhone}?text=${encodeURIComponent(waMessage)}`;
@@ -1148,7 +1157,6 @@ export default function CodDashboard() {
                             {order.order_number}
                           </td>
 
-                          {/* SELECTOR DINÁMICO DE VENDEDORAS */}
                           <td className="py-3 px-3 whitespace-nowrap">
                             <select
                               value={sellerName}
@@ -1308,96 +1316,11 @@ export default function CodDashboard() {
         )}
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 2: LOGÍSTICA & STOCK + CONFIGURACIÓN DE VENDEDORAS                */}
+        {/* SECCIÓN 2: LOGÍSTICA & CONTROL DE STOCK (LIMPIA)                          */}
         {/* ========================================================================= */}
         {activeTab === 'logistica' && (
           <section className="space-y-6">
             
-            {/* CONFIGURACIÓN DE VENDEDORAS (ROUND-ROBIN ESCALABLE) */}
-            <div className="bg-[#11141a] p-5 rounded-2xl border border-indigo-500/40 shadow-xl space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-xl">👩‍💼</span>
-                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">Gestión de Equipo de Ventas (Round-Robin Dinámico)</h3>
-                </div>
-                <span className="text-[10px] font-mono text-indigo-400 bg-indigo-500/10 border border-indigo-500/30 px-2.5 py-0.5 rounded-full">
-                  {sellerCount} VENDEDORAS ACTIVAS
-                </span>
-              </div>
-              <p className="text-xs text-zinc-400">
-                Selecciona cuántas vendedoras tienes trabajando. El webhook de Shopify distribuirá automáticamente los pedidos nuevos en partes iguales (1/N).
-              </p>
-              <div className="flex items-center gap-3 pt-1">
-                <label className="text-xs text-zinc-300 font-bold">Número de vendedoras:</label>
-                <select
-                  value={sellerCount}
-                  onChange={(e) => handleSellerCountChange(e.target.value)}
-                  className="bg-zinc-900 border border-zinc-700 text-white rounded-xl px-3 py-1.5 text-xs font-bold focus:outline-none focus:border-indigo-500"
-                >
-                  <option value="1">1 Vendedora</option>
-                  <option value="2">2 Vendedoras</option>
-                  <option value="3">3 Vendedoras</option>
-                  <option value="4">4 Vendedoras</option>
-                  <option value="5">5 Vendedoras</option>
-                </select>
-                <span className="text-[11px] text-zinc-500">Se generarán: {activeSellersList.join(', ')}</span>
-              </div>
-            </div>
-
-            {/* GOOGLE SHEETS & TELEGRAM CONFIG */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              
-              <div className="bg-[#11141a] p-5 rounded-2xl border border-emerald-500/40 shadow-xl space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xl">📊</span>
-                    <h3 className="text-sm font-bold text-white uppercase tracking-wider">Google Sheets (Empaque)</h3>
-                  </div>
-                  <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-0.5 rounded-full">
-                    AUTOSYNC
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-400">URL del Apps Script para enviar pedidos confirmados.</p>
-                <input
-                  type="text"
-                  placeholder="https://script.google.com/macros/s/.../exec"
-                  value={sheetWebhookUrl}
-                  onChange={(e) => saveConfig('cod_sheet_url', e.target.value, setSheetWebhookUrl)}
-                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-emerald-300 font-mono focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-
-              <div className="bg-[#11141a] p-5 rounded-2xl border border-blue-500/40 shadow-xl space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xl">🤖</span>
-                    <h3 className="text-sm font-bold text-white uppercase tracking-wider">Telegram Bot (Alertas)</h3>
-                  </div>
-                  <span className="text-[10px] font-mono text-blue-400 bg-blue-500/10 border border-blue-500/30 px-2.5 py-0.5 rounded-full">
-                    CONFIGURAR
-                  </span>
-                </div>
-                <p className="text-xs text-zinc-400">Pega aquí tu Token de BotFather y tu Chat ID personal.</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    type="text"
-                    placeholder="Bot Token"
-                    value={tgToken}
-                    onChange={(e) => saveConfig('cod_tg_token', e.target.value, setTgToken)}
-                    className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Chat ID"
-                    value={tgChatId}
-                    onChange={(e) => saveConfig('cod_tg_chatid', e.target.value, setTgChatId)}
-                    className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
-                  />
-                </div>
-              </div>
-
-            </div>
-
             {/* INVENTARIO */}
             <div className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 space-y-4">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-zinc-800 pb-3">
@@ -1743,6 +1666,96 @@ export default function CodDashboard() {
               </div>
             </div>
           </section>
+        )}
+
+        {/* MODAL PARA CONFIGURACIÓN GENERAL (AJUSTES ⚙️) */}
+        {showSettingsModal && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+            <div className="bg-[#11141a] border border-zinc-800 rounded-2xl p-6 max-w-xl w-full space-y-5 shadow-2xl">
+              <div className="flex justify-between items-center border-b border-zinc-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">⚙️</span>
+                  <h3 className="font-bold text-white text-base uppercase tracking-wider">Ajustes & Credenciales del Sistema</h3>
+                </div>
+                <button type="button" onClick={() => setShowSettingsModal(false)} className="text-zinc-400 hover:text-white text-sm cursor-pointer">✕</button>
+              </div>
+
+              <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+                
+                {/* 1. GESTIÓN DE VENDEDORAS */}
+                <div className="bg-zinc-950 p-4 rounded-xl border border-indigo-500/30 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-indigo-400 uppercase tracking-wide">👩‍💼 Equipo de Ventas (Round-Robin)</span>
+                    <span className="text-[10px] font-mono text-zinc-400">{sellerCount} Activas</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400">Número de vendedoras para el reparto equitativo automático de leads.</p>
+                  <select
+                    value={sellerCount}
+                    onChange={(e) => handleSellerCountChange(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-700 text-white rounded-xl px-3 py-2 text-xs font-bold focus:outline-none focus:border-indigo-500 cursor-pointer"
+                  >
+                    <option value="1">1 Vendedora</option>
+                    <option value="2">2 Vendedoras</option>
+                    <option value="3">3 Vendedoras</option>
+                    <option value="4">4 Vendedoras</option>
+                    <option value="5">5 Vendedoras</option>
+                  </select>
+                </div>
+
+                {/* 2. GOOGLE SHEETS */}
+                <div className="bg-zinc-950 p-4 rounded-xl border border-emerald-500/30 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-400 uppercase tracking-wide">📊 Sincronización Google Sheets</span>
+                    <span className="text-[10px] font-mono text-zinc-400">Almacén</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400">URL del Apps Script para enviar pedidos confirmados automáticamente.</p>
+                  <input
+                    type="text"
+                    placeholder="https://script.google.com/macros/s/.../exec"
+                    value={sheetWebhookUrl}
+                    onChange={(e) => saveConfig('cod_sheet_url', e.target.value, setSheetWebhookUrl)}
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-emerald-300 font-mono focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                {/* 3. TELEGRAM BOT */}
+                <div className="bg-zinc-950 p-4 rounded-xl border border-blue-500/30 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-blue-400 uppercase tracking-wide">🤖 Alertas de Telegram</span>
+                    <span className="text-[10px] font-mono text-zinc-400">Notificaciones</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400">Token del bot de BotFather y tu Chat ID personal.</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Bot Token"
+                      value={tgToken}
+                      onChange={(e) => saveConfig('cod_tg_token', e.target.value, setTgToken)}
+                      className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Chat ID"
+                      value={tgChatId}
+                      onChange={(e) => saveConfig('cod_tg_chatid', e.target.value, setTgChatId)}
+                      className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+              </div>
+
+              <div className="flex justify-end pt-3 border-t border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsModal(false)}
+                  className="px-5 py-2 rounded-xl text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition cursor-pointer"
+                >
+                  Guardar y Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* MODAL PARA EDITAR PEDIDO */}
