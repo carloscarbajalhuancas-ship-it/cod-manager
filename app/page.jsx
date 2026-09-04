@@ -74,12 +74,18 @@ export default function CodDashboard() {
   const [sheetWebhookUrl, setSheetWebhookUrl] = useState('');
   const [syncStatus, setSyncStatus] = useState('');
 
+  // Telegram Config
+  const [tgToken, setTgToken] = useState('8949067622:AAHrf1WHAsZEs5ZJYJ9YiKCrAZew2TXvu6Y');
+  const [tgChatId, setTgChatId] = useState('1072898889');
+
   useEffect(() => {
     if (typeof window !== 'undefined') {
       setAdSpend(localStorage.getItem('cod_spend') || '');
       setFleteLima(localStorage.getItem('cod_flete_lima') || '12');
       setFleteProv(localStorage.getItem('cod_flete_prov') || '15');
       setSheetWebhookUrl(localStorage.getItem('cod_sheet_url') || '');
+      setTgToken(localStorage.getItem('cod_tg_token') || '8949067622:AAHrf1WHAsZEs5ZJYJ9YiKCrAZew2TXvu6Y');
+      setTgChatId(localStorage.getItem('cod_tg_chatid') || '1072898889');
 
       const todayStr = new Date().toISOString().split('T')[0];
       setCustomStart(todayStr);
@@ -92,17 +98,53 @@ export default function CodDashboard() {
     localStorage.setItem(key, val);
   };
 
-  // ================= ENVÍO A TRAVÉS DEL PUENTE SERVIDOR =================
-  const sendOrderToGoogleSheet = async (order) => {
-    const url = sheetWebhookUrl || localStorage.getItem('cod_sheet_url');
-    if (!url) {
-      setSyncStatus('⚠️ Falta pegar la URL en Logística');
-      setTimeout(() => setSyncStatus(''), 4000);
-      return;
-    }
+  // ================= NOTIFICACIÓN A TELEGRAM =================
+  const sendTelegramNotification = async (order) => {
+    const token = tgToken || localStorage.getItem('cod_tg_token') || '8949067622:AAHrf1WHAsZEs5ZJYJ9YiKCrAZew2TXvu6Y';
+    const chatId = tgChatId || localStorage.getItem('cod_tg_chatid') || '1072898889';
+    if (!token || !chatId) return;
 
     try {
-      setSyncStatus(`Enviando ${order.order_number}...`);
+      const total = parseFloat(order.total_amount || 0);
+      const advance = parseFloat(order.advance_payment || 0);
+      const balance = Math.max(0, total - advance);
+
+      const productsSummary = order.items && Array.isArray(order.items)
+        ? order.items.map((it) => `${it.title} (x${it.quantity})`).join(', ')
+        : 'Producto General';
+
+      const message = `🔔 *¡PEDIDO CONFIRMADO!*\n\n` +
+        `📦 *Orden:* ${order.order_number}\n` +
+        `👤 *Cliente:* ${order.customer_name}\n` +
+        `📞 *Teléfono:* ${order.phone}\n` +
+        `📍 *Destino:* ${order.city} (${order.zone?.toUpperCase()})\n` +
+        `🛍️ *Productos:* ${productsSummary}\n` +
+        `💰 *Total:* S/ ${total.toFixed(2)}\n` +
+        `💵 *Adelanto:* S/ ${advance.toFixed(2)}\n` +
+        `📌 *Saldo a Cobrar:* S/ ${balance.toFixed(2)}\n` +
+        `👩‍💼 *Vendedora:* ${order.assigned_seller || 'Vendedora 1'}`;
+
+      await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          text: message,
+          parse_mode: 'Markdown',
+        }),
+      });
+    } catch (err) {
+      console.error('Error enviando notificación a Telegram:', err);
+    }
+  };
+
+  // ================= SINCRONIZACIÓN A GOOGLE SHEETS =================
+  const sendOrderToGoogleSheet = async (order) => {
+    const url = sheetWebhookUrl || localStorage.getItem('cod_sheet_url');
+    if (!url) return;
+
+    try {
+      setSyncStatus(`Enviando ${order.order_number} a Sheets...`);
       const total = parseFloat(order.total_amount || 0);
       const advance = parseFloat(order.advance_payment || 0);
       const balance = Math.max(0, total - advance);
@@ -112,40 +154,34 @@ export default function CodDashboard() {
 
       const productsSummary = order.items && Array.isArray(order.items)
         ? order.items.map((it) => `${it.title} (x${it.quantity})`).join(', ')
-        : 'Producto';
+        : 'Producto General';
 
       const payload = {
-        sheetUrl: url,
-        orderData: {
-          order_number: order.order_number,
-          date: dateFormatted,
-          customer_name: order.customer_name,
-          phone: order.phone,
-          customer_dni: order.customer_dni || '',
-          zone: order.zone || 'lima',
-          city: order.city || '',
-          address: order.address || '',
-          products: productsSummary,
-          balance: balance,
-          seller: order.assigned_seller || 'Vendedora 1',
-        }
+        order_number: order.order_number,
+        date: dateFormatted,
+        customer_name: order.customer_name,
+        phone: order.phone,
+        customer_dni: order.customer_dni || '',
+        zone: order.zone || 'lima',
+        city: order.city || '',
+        address: order.address || '',
+        products: productsSummary,
+        balance: balance,
+        seller: order.assigned_seller || 'Vendedora 1',
       };
 
-      const res = await fetch('/api/sync-sheet', {
+      await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain' },
         body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        setSyncStatus(`✓ ${order.order_number} escrito en Sheets`);
-      } else {
-        setSyncStatus('⚠️ Error al procesar en servidor');
-      }
+      setSyncStatus(`✓ ${order.order_number} sincronizado en Sheets`);
       setTimeout(() => setSyncStatus(''), 3500);
     } catch (err) {
       console.error('Error al sincronizar con Google Sheets:', err);
-      setSyncStatus('⚠️ Error de conexión');
+      setSyncStatus('⚠️ Error al enviar a Sheets');
       setTimeout(() => setSyncStatus(''), 4000);
     }
   };
@@ -168,7 +204,7 @@ export default function CodDashboard() {
       fetchData();
 
       const channel = supabase
-        .channel('realtime_dashboard_final_sheet')
+        .channel('realtime_dashboard_tg')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => fetchData())
         .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => fetchData())
         .subscribe();
@@ -256,8 +292,11 @@ export default function CodDashboard() {
 
     await supabase.from('orders').update(payload).eq('id', order.id);
 
+    // SINCRONIZAR SHEETS Y TELEGRAM AL CONFIRMAR
     if (newStatus === 'confirmado') {
-      sendOrderToGoogleSheet({ ...order, status: 'confirmado' });
+      const updatedOrder = { ...order, status: 'confirmado' };
+      sendOrderToGoogleSheet(updatedOrder);
+      sendTelegramNotification(updatedOrder);
     }
 
     fetchData();
@@ -283,7 +322,9 @@ export default function CodDashboard() {
     }).eq('id', order.id);
 
     if (newStatus === 'confirmado') {
-      sendOrderToGoogleSheet({ ...order, advance_payment: advance, status: 'confirmado' });
+      const updatedOrder = { ...order, advance_payment: advance, status: 'confirmado' };
+      sendOrderToGoogleSheet(updatedOrder);
+      sendTelegramNotification(updatedOrder);
     }
 
     fetchData();
@@ -306,7 +347,9 @@ export default function CodDashboard() {
       await supabase.from('orders').update(payload).eq('id', order.id);
 
       if (newStatus === 'confirmado') {
-        sendOrderToGoogleSheet({ ...order, status: 'confirmado' });
+        const updatedOrder = { ...order, status: 'confirmado' };
+        sendOrderToGoogleSheet(updatedOrder);
+        sendTelegramNotification(updatedOrder);
       }
     }
 
@@ -379,7 +422,9 @@ export default function CodDashboard() {
     await supabase.from('orders').update(payload).eq('id', editingOrder.id);
 
     if (targetStatus === 'confirmado') {
-      sendOrderToGoogleSheet({ ...editingOrder, status: 'confirmado' });
+      const updatedOrder = { ...editingOrder, status: 'confirmado', advance_payment: advance };
+      sendOrderToGoogleSheet(updatedOrder);
+      sendTelegramNotification(updatedOrder);
     }
 
     setEditingOrder(null);
@@ -704,7 +749,7 @@ export default function CodDashboard() {
     <main className="min-h-screen bg-[#090b0e] text-zinc-100 font-sans antialiased p-4 md:p-8">
       <div className="max-w-7xl mx-auto space-y-6">
 
-        {/* HEADER */}
+        {/* HEADER & SYNC */}
         <header className="bg-[#11141a] p-5 rounded-2xl border border-zinc-800 flex flex-col md:flex-row items-center justify-between gap-4 shadow-xl">
           <div>
             <div className="flex items-center gap-3">
@@ -897,7 +942,7 @@ export default function CodDashboard() {
                     onClick={() => handleBulkStatusChange('confirmado')}
                     className="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3 py-1.5 rounded-lg transition"
                   >
-                    Confirmados (→ Sheets)
+                    Confirmados (→ Sheets & TG)
                   </button>
                   <button
                     onClick={() => handleBulkStatusChange('en_ruta')}
@@ -934,7 +979,7 @@ export default function CodDashboard() {
               </div>
             )}
 
-            {/* FILTROS POR ESTADO + FILTRO POR VENDEDORA */}
+            {/* FILTROS DE ESTADO Y VENDEDORA */}
             <div className="bg-[#11141a] p-3.5 rounded-xl border border-zinc-800 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800/80 pb-2.5">
                 <div className="flex items-center gap-2">
@@ -1213,15 +1258,23 @@ export default function CodDashboard() {
                             </select>
                           </td>
 
-                          {/* ACCIONES */}
                           <td className="py-3 px-3">
                             <div className="flex items-center justify-center gap-1.5">
+                              {/* Reenviar Sheets */}
                               <button
                                 onClick={() => sendOrderToGoogleSheet(order)}
-                                title="Enviar manualmente a Google Sheets"
+                                title="Enviar a Google Sheets"
                                 className="bg-emerald-950/60 hover:bg-emerald-900 text-emerald-400 p-1 rounded text-xs border border-emerald-500/40 transition"
                               >
                                 📊
+                              </button>
+                              {/* Reenviar Telegram */}
+                              <button
+                                onClick={() => sendTelegramNotification(order)}
+                                title="Enviar alerta a Telegram"
+                                className="bg-blue-950/60 hover:bg-blue-900 text-blue-400 p-1 rounded text-xs border border-blue-500/40 transition"
+                              >
+                                🤖
                               </button>
                               <a
                                 href={waUrl}
@@ -1261,34 +1314,63 @@ export default function CodDashboard() {
         )}
 
         {/* ========================================================================= */}
-        {/* SECCIÓN 2: LOGÍSTICA & CONTROL DE STOCK + WEBHOOK DE GOOGLE SHEETS        */}
+        {/* SECCIÓN 2: LOGÍSTICA & CONTROL DE STOCK + SHEETS + TELEGRAM CONFIG        */}
         {/* ========================================================================= */}
         {activeTab === 'logistica' && (
           <section className="space-y-6">
             
-            {/* CONFIGURACIÓN GOOGLE SHEETS */}
-            <div className="bg-[#11141a] p-5 rounded-2xl border border-emerald-500/40 shadow-xl space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-xl">📊</span>
-                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">Conexión con Google Sheets (Almacén & Empaque)</h3>
+            {/* GOOGLE SHEETS & TELEGRAM CONFIG */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              
+              <div className="bg-[#11141a] p-5 rounded-2xl border border-emerald-500/40 shadow-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">📊</span>
+                    <h3 className="text-sm font-bold text-white uppercase tracking-wider">Google Sheets (Empaque)</h3>
+                  </div>
+                  <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-0.5 rounded-full">
+                    AUTOSYNC
+                  </span>
                 </div>
-                <span className="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2.5 py-0.5 rounded-full">
-                  AUTOSYNC ACTIVO
-                </span>
-              </div>
-              <p className="text-xs text-zinc-400">
-                Pega aquí la URL de la aplicación web de Google Apps Script. Los pedidos confirmados se enviarán de inmediato a tu hoja protegida.
-              </p>
-              <div className="flex gap-2">
+                <p className="text-xs text-zinc-400">URL del Apps Script para enviar pedidos confirmados.</p>
                 <input
                   type="text"
-                  placeholder="https://script.google.com/macros/s/AKfycbx.../exec"
+                  placeholder="https://script.google.com/macros/s/.../exec"
                   value={sheetWebhookUrl}
                   onChange={(e) => saveConfig('cod_sheet_url', e.target.value, setSheetWebhookUrl)}
                   className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-emerald-300 font-mono focus:outline-none focus:border-emerald-500"
                 />
               </div>
+
+              <div className="bg-[#11141a] p-5 rounded-2xl border border-blue-500/40 shadow-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🤖</span>
+                    <h3 className="text-sm font-bold text-white uppercase tracking-wider">Telegram Bot (Alertas)</h3>
+                  </div>
+                  <span className="text-[10px] font-mono text-blue-400 bg-blue-500/10 border border-blue-500/30 px-2.5 py-0.5 rounded-full">
+                    CONFIGURADO
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400">Token y Chat ID para alertas en tiempo real.</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    placeholder="Bot Token"
+                    value={tgToken}
+                    onChange={(e) => saveConfig('cod_tg_token', e.target.value, setTgToken)}
+                    className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Chat ID"
+                    value={tgChatId}
+                    onChange={(e) => saveConfig('cod_tg_chatid', e.target.value, setTgChatId)}
+                    className="bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2 text-xs text-blue-300 font-mono focus:outline-none"
+                  />
+                </div>
+              </div>
+
             </div>
 
             {/* INVENTARIO */}
@@ -1319,7 +1401,7 @@ export default function CodDashboard() {
                     placeholder="Costo S/"
                     value={newProdCost}
                     onChange={(e) => setNewProdCost(e.target.value)}
-                    className="w-20 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-white"
+                    className="w-20 bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1 text-xs text-white"
                   />
                   <button type="submit" className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs px-3 py-1 rounded">
                     + Añadir
